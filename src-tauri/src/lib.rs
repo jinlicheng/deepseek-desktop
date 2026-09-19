@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tauri::menu::{MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 use tauri_plugin_opener::OpenerExt;
 
@@ -72,18 +72,25 @@ fn apply_tab_bounds(app: &AppHandle) {
     }
 }
 
-/// 懒加载：首次切换到某个 tab 时才创建它的 webview。
-/// 只能在主线程调用（macOS 上 WKWebView 的创建限制）；
-/// 同步 command 和菜单事件都运行在主线程，满足要求。
-fn ensure_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
+/// 创建 tab 的 webview 并放到 tab 栏下方。
+///
+/// 只在 `setup` 阶段调用：Windows 上在同步 command / 事件处理器里创建 webview 会死锁
+/// （tauri 文档明确的限制），所以不在切换逻辑里懒创建。
+/// Kimi 先用 about:blank 占位，首次切换时才真正加载，避免启动时同时拉两个重型站点。
+fn create_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
     if app.get_webview(name).is_some() {
         return Ok(());
     }
     let win = app.get_window(WIN_LABEL).expect("main window");
     let (position, size) = tab_bounds(app, &win)?;
+    let url = if name == TAB_KIMI {
+        "about:blank".to_string()
+    } else {
+        tab_url(name).to_string()
+    };
 
     let handler_app = app.clone();
-    let builder = tauri::WebviewBuilder::new(name, WebviewUrl::External(tab_url(name).parse().unwrap()))
+    let builder = tauri::WebviewBuilder::new(name, WebviewUrl::External(url.parse().unwrap()))
         // target="_blank" / window.open 统一处理：
         // 按域名路由到对应 tab 的 webview，其余外链交给系统浏览器
         .on_new_window(move |url, _features| {
@@ -111,21 +118,35 @@ fn ensure_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
     // 这里显式设定一次
     let _ = wv.set_position(position);
     let _ = wv.set_size(size);
+    if name != TAB_DEEPSEEK {
+        let _ = wv.hide();
+    }
     Ok(())
 }
 
-/// 切换 tab：懒创建 → 显隐切换 → 焦点移交给新 tab → 通知 tab 栏更新高亮
+/// 切换 tab：显隐切换 → 焦点移交给新 tab → 通知 tab 栏更新高亮。
+/// 不创建 webview（见 create_tab_webview 的说明），因此可以安全地由命令和菜单事件调用。
 fn activate_tab(app: &AppHandle, name: &str) {
     let name = if name == TAB_KIMI { TAB_KIMI } else { TAB_DEEPSEEK };
-    let _ = ensure_tab_webview(app, name);
     for tab in [TAB_DEEPSEEK, TAB_KIMI] {
-        if let Some(wv) = app.get_webview(tab) {
-            if tab == name {
-                let _ = wv.show();
-                let _ = wv.set_focus();
-            } else {
-                let _ = wv.hide();
+        let Some(wv) = app.get_webview(tab) else {
+            continue;
+        };
+        if tab == name {
+            // Kimi 仍是占位页时，首次切换才加载真实站点
+            let is_placeholder = wv
+                .url()
+                .map(|url| url.as_str() == "about:blank")
+                .unwrap_or(false);
+            if is_placeholder {
+                if let Ok(url) = tab_url(tab).parse() {
+                    let _ = wv.navigate(url);
+                }
             }
+            let _ = wv.show();
+            let _ = wv.set_focus();
+        } else {
+            let _ = wv.hide();
         }
     }
     let _ = app.emit("tab-changed", name);
@@ -160,6 +181,30 @@ fn report_viewport(app: AppHandle, inner_h: f64) {
     apply_tab_bounds(&app);
 }
 
+/// 菜单栏的「标签」子菜单，含 Cmd/Ctrl+1、Cmd/Ctrl+2 快捷键
+fn setup_menu(app: &tauri::App) -> tauri::Result<()> {
+    let item_deepseek = MenuItemBuilder::with_id(MENU_TAB_DEEPSEEK, "DeepSeek")
+        .accelerator("CmdOrCtrl+1")
+        .build(app)?;
+    let item_kimi = MenuItemBuilder::with_id(MENU_TAB_KIMI, "Kimi")
+        .accelerator("CmdOrCtrl+2")
+        .build(app)?;
+    let tabs_menu = SubmenuBuilder::new(app, "标签")
+        .items(&[&item_deepseek, &item_kimi])
+        .build()?;
+
+    match app.menu() {
+        // macOS：tauri 会自动创建默认菜单，直接追加即可
+        Some(menu) => menu.append(&tabs_menu)?,
+        // Windows / Linux：tauri 的默认菜单是 macOS 专属的，这里自建一个
+        // （否则 app.menu() 为 None，把菜单设为 None 会让快捷键失效）
+        None => {
+            app.set_menu(MenuBuilder::new(app).item(&tabs_menu).build()?)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -178,20 +223,12 @@ pub fn run() {
         .setup(|app| {
             app.manage(TabGeometry::default());
 
-            // DeepSeek 随启动加载；Kimi 首次切换时再创建
+            // 两个 tab 的 webview 都在这里创建（见 create_tab_webview 的说明）
+            create_tab_webview(app.handle(), TAB_DEEPSEEK)?;
+            create_tab_webview(app.handle(), TAB_KIMI)?;
             activate_tab(app.handle(), TAB_DEEPSEEK);
 
-            // Cmd+1 / Cmd+2 切换 tab（Windows / Linux 上自动映射为 Ctrl+数字）
-            let item_deepseek = MenuItemBuilder::with_id(MENU_TAB_DEEPSEEK, "DeepSeek")
-                .accelerator("CmdOrCtrl+1")
-                .build(app)?;
-            let item_kimi = MenuItemBuilder::with_id(MENU_TAB_KIMI, "Kimi")
-                .accelerator("CmdOrCtrl+2")
-                .build(app)?;
-            let tabs_menu = SubmenuBuilder::new(app, "标签")
-                .items(&[&item_deepseek, &item_kimi])
-                .build()?;
-            app.menu().expect("default menu").append(&tabs_menu)?;
+            setup_menu(app)?;
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {

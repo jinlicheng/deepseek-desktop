@@ -10,7 +10,7 @@ pub fn run() {
             tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
-                tauri::WebviewUrl::External("https://www.deepseek.com".parse().unwrap()),
+                tauri::WebviewUrl::External("https://chat.deepseek.com".parse().unwrap()),
             )
             .title("DeepSeek")
             .inner_size(1200.0, 800.0)

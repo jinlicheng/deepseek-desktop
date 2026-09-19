@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -19,6 +20,8 @@ struct TabGeometry {
     title_bar: Mutex<f64>,
     /// 最近一次应用到子 webview 的几何，用于跳过重复设置
     last_applied: Mutex<Option<(LogicalPosition<f64>, LogicalSize<f64>)>>,
+    /// Kimi 是否已加载过真实站点（创建时先是 about:blank 占位）
+    kimi_loaded: AtomicBool,
 }
 
 fn tab_url(name: &str) -> &'static str {
@@ -128,17 +131,18 @@ fn create_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
 /// 不创建 webview（见 create_tab_webview 的说明），因此可以安全地由命令和菜单事件调用。
 fn activate_tab(app: &AppHandle, name: &str) {
     let name = if name == TAB_KIMI { TAB_KIMI } else { TAB_DEEPSEEK };
+    let geometry = app.state::<TabGeometry>();
     for tab in [TAB_DEEPSEEK, TAB_KIMI] {
         let Some(wv) = app.get_webview(tab) else {
             continue;
         };
         if tab == name {
-            // Kimi 仍是占位页时，首次切换才加载真实站点
-            let is_placeholder = wv
-                .url()
-                .map(|url| url.as_str() == "about:blank")
-                .unwrap_or(false);
-            if is_placeholder {
+            // Kimi 还是占位页时，首次切换才真正加载站点。
+            // 注意：这里不能用 webview.url() 判断——wry 0.55.1 在页面为 about:blank 时
+            // 会对其返回 nil 的 URL 直接 unwrap 而 panic（wkwebview/mod.rs:1349）。
+            let first_activation =
+                tab == TAB_KIMI && !geometry.kimi_loaded.swap(true, Ordering::Relaxed);
+            if first_activation {
                 if let Ok(url) = tab_url(tab).parse() {
                     let _ = wv.navigate(url);
                 }
@@ -161,9 +165,7 @@ fn switch_tab(app: AppHandle, name: String) {
 #[tauri::command]
 fn reload_tab(app: AppHandle, name: String) {
     if let Some(wv) = app.get_webview(name.as_str()) {
-        if let Ok(url) = wv.url() {
-            let _ = wv.navigate(url);
-        }
+        let _ = wv.reload();
     }
 }
 
@@ -197,7 +199,7 @@ fn setup_menu(app: &tauri::App) -> tauri::Result<()> {
         // macOS：tauri 会自动创建默认菜单，直接追加即可
         Some(menu) => menu.append(&tabs_menu)?,
         // Windows / Linux：tauri 的默认菜单是 macOS 专属的，这里自建一个
-        // （否则 app.menu() 为 None，把菜单设为 None 会让快捷键失效）
+        // （否则 app.menu() 为 None，快捷键也就无从注册）
         None => {
             app.set_menu(MenuBuilder::new(app).item(&tabs_menu).build()?)?;
         }

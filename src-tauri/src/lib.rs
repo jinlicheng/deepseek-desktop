@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use tauri::menu::{MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 use tauri_plugin_opener::OpenerExt;
@@ -10,10 +12,63 @@ const TAB_KIMI: &str = "kimi";
 const MENU_TAB_DEEPSEEK: &str = "menu-tab-deepseek";
 const MENU_TAB_KIMI: &str = "menu-tab-kimi";
 
+#[derive(Default)]
+struct TabGeometry {
+    /// 标题栏高度补偿（逻辑像素）= 窗口高度 − 页面视口高度。
+    /// 全屏时为 0，macOS 窗口模式约 28。由本地页面上报的数据校准后缓存。
+    title_bar: Mutex<f64>,
+    /// 最近一次应用到子 webview 的几何，用于跳过重复设置
+    last_applied: Mutex<Option<(LogicalPosition<f64>, LogicalSize<f64>)>>,
+}
+
 fn tab_url(name: &str) -> &'static str {
     match name {
         TAB_KIMI => "https://www.kimi.com",
-        _ => "https://www.deepseek.com",
+        _ => "https://chat.deepseek.com",
+    }
+}
+
+/// 子 webview 的位置与尺寸。
+///
+/// macOS 上 `window.inner_size()` 把标题栏高度也算在内，而子 webview 的坐标系基于
+/// 包含标题栏的那个视图：不补偿的话子 webview 会整体上移一个标题栏高度（约 28px），
+/// 把顶部的 tab 栏盖住；全屏没有标题栏，所以恰好正常。补偿量由本地页面
+/// （`window.innerHeight`，即真实可见内容区高度）校准得出，全屏与 Windows/Linux 上为 0，
+/// 不需要任何平台判断。
+fn tab_bounds(
+    app: &AppHandle,
+    window: &tauri::Window,
+) -> tauri::Result<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    let scale = window.scale_factor()?;
+    let win_size = window.inner_size()?.to_logical::<f64>(scale);
+    let title_bar = *app.state::<TabGeometry>().title_bar.lock().unwrap();
+    let content_height = (win_size.height - title_bar).max(0.0);
+    Ok((
+        LogicalPosition::new(0.0, title_bar + TABBAR_HEIGHT),
+        LogicalSize::new(win_size.width, (content_height - TABBAR_HEIGHT).max(0.0)),
+    ))
+}
+
+fn apply_tab_bounds(app: &AppHandle) {
+    let Some(win) = app.get_window(WIN_LABEL) else {
+        return;
+    };
+    let Ok((position, size)) = tab_bounds(app, &win) else {
+        return;
+    };
+    {
+        let geometry = app.state::<TabGeometry>();
+        let mut last = geometry.last_applied.lock().unwrap();
+        if *last == Some((position, size)) {
+            return;
+        }
+        *last = Some((position, size));
+    }
+    for name in [TAB_DEEPSEEK, TAB_KIMI] {
+        if let Some(wv) = app.get_webview(name) {
+            let _ = wv.set_position(position);
+            let _ = wv.set_size(size);
+        }
     }
 }
 
@@ -25,12 +80,10 @@ fn ensure_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
         return Ok(());
     }
     let win = app.get_window(WIN_LABEL).expect("main window");
-    let scale = win.scale_factor()?;
-    let size = win.inner_size()?.to_logical::<f64>(scale);
+    let (position, size) = tab_bounds(app, &win)?;
 
     let handler_app = app.clone();
     let builder = tauri::WebviewBuilder::new(name, WebviewUrl::External(tab_url(name).parse().unwrap()))
-        .auto_resize()
         // target="_blank" / window.open 统一处理：
         // 按域名路由到对应 tab 的 webview，其余外链交给系统浏览器
         .on_new_window(move |url, _features| {
@@ -53,11 +106,11 @@ fn ensure_tab_webview(app: &AppHandle, name: &str) -> tauri::Result<()> {
             tauri::webview::NewWindowResponse::Deny
         });
 
-    win.add_child(
-        builder,
-        LogicalPosition::new(0.0, TABBAR_HEIGHT),
-        LogicalSize::new(size.width, (size.height - TABBAR_HEIGHT).max(0.0)),
-    )?;
+    let wv = win.add_child(builder, position, size)?;
+    // add_child 传入的 bounds 不会应用到原生视图（子 webview 默认是整窗大小），
+    // 这里显式设定一次
+    let _ = wv.set_position(position);
+    let _ = wv.set_size(size);
     Ok(())
 }
 
@@ -93,29 +146,38 @@ fn reload_tab(app: AppHandle, name: String) {
     }
 }
 
+/// 本地页面（tab 栏）上报真实视口尺寸：页面加载完与每次缩放都会调用。
+/// 用它校准标题栏补偿量，再重算子 webview 几何。
+#[tauri::command]
+fn report_viewport(app: AppHandle, inner_h: f64) {
+    if let Some(win) = app.get_window(WIN_LABEL) {
+        if let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) {
+            let win_height = size.to_logical::<f64>(scale).height;
+            *app.state::<TabGeometry>().title_bar.lock().unwrap() =
+                (win_height - inner_h).max(0.0);
+        }
+    }
+    apply_tab_bounds(&app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![switch_tab, reload_tab])
+        .invoke_handler(tauri::generate_handler![
+            switch_tab,
+            reload_tab,
+            report_viewport
+        ])
         .on_window_event(|window, event| {
-            // auto_resize 之外的保险：窗口缩放时手动同步两个子 webview
+            // 窗口缩放时同步两个子 webview（tab 栏高度固定，不随窗口缩放）
             if let tauri::WindowEvent::Resized(_) = event {
-                if let (Ok(scale), Ok(size)) = (window.scale_factor(), window.inner_size()) {
-                    let size = size.to_logical::<f64>(scale);
-                    for name in [TAB_DEEPSEEK, TAB_KIMI] {
-                        if let Some(wv) = window.get_webview(name) {
-                            let _ = wv.set_position(LogicalPosition::new(0.0, TABBAR_HEIGHT));
-                            let _ = wv.set_size(LogicalSize::new(
-                                size.width,
-                                (size.height - TABBAR_HEIGHT).max(0.0),
-                            ));
-                        }
-                    }
-                }
+                apply_tab_bounds(window.app_handle());
             }
         })
         .setup(|app| {
+            app.manage(TabGeometry::default());
+
             // DeepSeek 随启动加载；Kimi 首次切换时再创建
             activate_tab(app.handle(), TAB_DEEPSEEK);
 

@@ -57,6 +57,14 @@
           el.classList.toggle('active', el.dataset.tab === event.payload);
         });
       });
+
+      // 临时诊断：上报本地页面视口指标，用于定位窗口模式下的几何偏差
+      // 上报视口高度：Rust 侧用它校准子 webview 的几何（窗口高度含标题栏，视口不含）
+      const reportViewport = () => {
+        invoke('report_viewport', { innerH: window.innerHeight });
+      };
+      window.addEventListener('resize', reportViewport);
+      reportViewport();
     </script>
   </body>
 </html>

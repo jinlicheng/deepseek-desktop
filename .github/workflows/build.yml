@@ -62,7 +62,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-${{ matrix.platform }}
+          name: jai-${{ matrix.platform }}
           path: |
             src-tauri/target/**/bundle/nsis/*-setup.exe
             src-tauri/target/**/bundle/dmg/*.dmg

@@ -2,17 +2,46 @@
 
 [中文](README.md) | **English**
 
-A desktop app that puts the DeepSeek and Kimi web apps in one window, with two tabs and keyboard shortcuts.
+A desktop app that puts the web versions of AI tools in one window: multiple tabs, with a configurable site list.
 
-> Unofficial project. Not affiliated with, endorsed by, or supported by DeepSeek or Moonshot AI (Kimi).
+> Unofficial project. Not affiliated with, endorsed by, or supported by DeepSeek, Moonshot AI (Kimi) or any other site it can open.
 
 ## Features
 
-- Two tabs: **DeepSeek** (`chat.deepseek.com`) and **Kimi** (`www.kimi.com`)
-- Switch tabs with `Cmd/Ctrl + 1` / `Cmd/Ctrl + 2`, or by clicking the tab bar
+- **Configurable tab set**: sites live in a config file and can be added, edited, reordered or removed
+- **Opens the first N tabs on startup** (N can be 0–9); the rest are one click away in the **▾** list
+- **Two kinds of tabs**
+  - Pinned: come from the config, have no close button, are removed through the config
+  - Ephemeral: opened from **▾** or added without saving, show a **×**, and are disposed when closed
+- Four entries in the tab bar: **⟳** reload the active tab, **＋** add a tab, **▾** open a configured site, **⚙** settings (clicking the same button closes the panel again)
+- Switch tabs with `Cmd/Ctrl + 1~9` (the **标签** menu is rebuilt to match the open tabs)
 - In-site links open in the current tab; external links go to the system browser
-- Reload button (⟳) in the top right — a fallback for when the web content process is reclaimed
-- Only DeepSeek loads at startup; Kimi loads on first activation
+- At most 9 tabs open at once (the config list itself is unlimited)
+
+On first run a built-in default config (DeepSeek + Kimi) is used; the config file is written on the first modification.
+
+## Configuration file
+
+`tabs.json` — you can edit it by hand (it is picked up on the next launch):
+
+| Platform | Path |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.kelvin.jai/tabs.json` |
+| Linux | `~/.config/com.kelvin.jai/tabs.json` |
+| Windows | `%APPDATA%\com.kelvin.jai\tabs.json` |
+
+```json
+{
+  "startup_count": 2,
+  "tabs": [
+    { "id": "t_deepseek", "name": "DeepSeek", "url": "https://chat.deepseek.com" },
+    { "id": "t_kimi", "name": "Kimi", "url": "https://www.kimi.com" }
+  ]
+}
+```
+
+- `startup_count`: how many of the leading tabs are opened automatically; the rest go to the **▾** list
+- `tabs`: the order defines the tab order; `id` only needs to be unique in the file, `url` must be http/https
 
 ## Requirements
 
@@ -22,15 +51,17 @@ A desktop app that puts the DeepSeek and Kimi web apps in one window, with two t
 | Windows | Visual Studio C++ Build Tools; WebView2 runtime (bundled with Windows 11) |
 | Linux | `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` |
 
-You also need Rust (via rustup) and Node.js 24+.
+You also need Rust (via rustup) and Node.js 24+. The frontend is Vue 3 + Vite, installed by `npm install`.
 
 ## Development and build
 
 ```bash
 npm install
-npm run tauri dev     # run in development
-npm run tauri build   # build installers
+npm run tauri dev     # dev mode (Vite HMR + debug build)
+npm run tauri build   # release build
 ```
+
+During development prefer a debug build (much faster): `npm run tauri build -- --debug --bundles app`.
 
 Build output:
 
@@ -43,24 +74,35 @@ Build output:
 ## Project layout
 
 ```
-src/index.html                 Tab bar page (local HTML, talks to Rust over IPC)
-src-tauri/src/lib.rs           Core logic: window and child webviews, menu shortcuts,
-                               geometry, link routing
-src-tauri/tauri.conf.json      Window configuration and app metadata
-src-tauri/capabilities/        Permissions for the local page
-.github/workflows/build.yml    Three-platform CI build
+index.html                          Vite entry
+vite.config.js                      Vite config (fixed port 1420, matching devUrl)
+src/App.vue                         Root component: subscribes to state-changed, dispatches
+                                    commands, switches panels
+src/components/TabBar.vue           Tab bar: tab list + ⟳ / ＋ / ▾ / ⚙
+src/components/TabDialog.vue        Add-tab form (name / url / save-to-config)
+src/components/AvailablePanel.vue   Configured sites that are not currently open
+src/components/SettingsPanel.vue    Config management: rename, change url, reorder, delete,
+                                    startup count
+src-tauri/src/lib.rs                Window and geometry, panel state, bootstrap
+src-tauri/src/tabs.rs               Tab state machine, IPC commands, menu rebuild,
+                                    webview lifecycle
+src-tauri/src/config.rs             Config model and persistence (tabs.json)
+src-tauri/tauri.conf.json           Window configuration and app metadata
+.github/workflows/build.yml         Three-platform CI build
 ```
 
 ## Implementation notes
 
-The app layers native child webviews on top of a local page: the window's own webview draws the tab bar, while the two sites run in native child webviews placed in a fixed content area. The following pitfalls were hit during development and are handled in the code:
+The app layers native child webviews on top of a local Vue page: the window's own webview draws the tab bar and panels, while each site runs in a native child webview placed in a fixed content area. The following pitfalls were hit during development and are handled in the code:
 
 - **Multiple webviews require the `unstable` feature**: `WebviewBuilder`, `Window::add_child` and `Manager::get_webview` only exist behind `tauri = { version = "2", features = ["unstable"] }`.
-- **New-window requests must be intercepted**: site entry buttons are usually `target="_blank"`, and WKWebView silently drops such requests (the click appears to do nothing). They are routed through `on_new_window`.
-- **The macOS title bar offset**: `window.inner_size()` includes the title bar height, while child webviews are positioned relative to a view that includes it too. Using it directly pushes the child webviews roughly 28px up, covering the tab bar (full screen happens to work because there is no title bar). The code calibrates the offset from the local page's `window.innerHeight`; the compensation is automatically 0 in full screen and on Windows/Linux.
-- **Never call `Webview::url()` on an `about:blank` page**: wry 0.55.1 unwraps a nil URL and panics (`wkwebview/mod.rs:1349`). Kimi's placeholder state is tracked by a Rust-side flag instead.
-- **Do not create webviews from commands or event handlers on Windows**: the Tauri docs state this deadlocks. Both tab webviews are created during `setup()`.
+- **The frontend must report `window.innerHeight`** (`report_viewport`): on macOS `window.inner_size()` includes the title bar height, while child webviews are positioned relative to a view that includes it too; without the compensation they shift roughly 28px up and cover the tab bar (full screen happens to work because there is no title bar). The compensation is window height minus page viewport height, and it is automatically 0 in full screen and on Windows/Linux. **Removing that report reintroduces the bug.**
+- **Native child webviews always float above the DOM**: panels and forms cannot overlay a web page, so the right-hand panels dock and the webviews give up 340px of width (subtracted in the Rust geometry code).
+- **All geometry changes go through `apply_bounds`**, which computes, records (`last_applied`) and applies. Previously `reconcile` changed geometry without updating the record, which made the deduplication skip a needed update and left panels hidden after adding or deleting a tab. Keep new geometry logic on that single path.
+- **Do not create webviews from commands or event handlers on Windows** (the Tauri docs state this deadlocks): every create/destroy/recreate is posted to the main thread (`run_on_main_thread`).
 - **Windows/Linux have no default menu**: Tauri's default menu is macOS-only. The code builds its own menu when `app.menu()` is `None`, otherwise the app panics at startup.
+- **Do not rely on `Webview::url()`**: wry 0.55.1 unwraps a nil URL on `about:blank` pages and panics (`wkwebview/mod.rs:1349`). Reloading uses `Webview::reload()`; placeholder state is tracked in Rust.
+- **Vue swallows render errors** (you just see an empty area): `src/main.js` installs an `errorHandler` that reports them to Rust, which prints `[ui-error] ...`. That is how frontend/backend field mismatches surface.
 
 ## Known caveats
 
@@ -74,4 +116,4 @@ Pushing to `main` or manually triggering the `build` workflow builds Windows, ma
 
 ## Editor setup (optional)
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri extension](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri extension](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

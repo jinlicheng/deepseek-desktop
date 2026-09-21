@@ -1,0 +1,81 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; background: #17181c; }
+body {
+  font: 13px/1.4 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+  user-select: none;
+  color: #d6d8de;
+}
+#app { height: 100%; display: flex; flex-direction: column; }
+
+/* 与 Rust 侧 TABBAR_HEIGHT 一致 */
+#tabbar {
+  height: 40px; flex: none;
+  display: flex; align-items: stretch;
+  background: #232428; border-bottom: 1px solid #101114;
+}
+.tab {
+  display: flex; align-items: center; gap: 6px; padding: 0 14px;
+  color: #8b8e98; cursor: pointer; border-right: 1px solid #101114;
+  max-width: 200px;
+}
+.tab > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab:hover { color: #d6d8de; }
+.tab.active { color: #fff; background: #17181c; box-shadow: inset 0 2px 0 #4c8dff; }
+.tab .close { color: #666a75; padding: 0 3px; border-radius: 3px; }
+.tab .close:hover { color: #fff; background: #3a3d45; }
+
+.spacer { flex: 1; }
+.btn {
+  display: flex; align-items: center; padding: 0 12px;
+  color: #8b8e98; cursor: pointer; font-size: 14px;
+}
+.btn:hover, .btn.active { color: #fff; }
+
+#content { flex: 1; display: flex; min-height: 0; }
+.placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center; color: #565a64;
+}
+
+/* 与 Rust 侧 PANEL_WIDTH 一致 */
+.panel {
+  width: 340px; flex: none;
+  background: #1e1f24; border-left: 1px solid #101114;
+  display: flex; flex-direction: column;
+  padding: 14px; gap: 10px; overflow-y: auto;
+}
+.panel h2 {
+  font-size: 14px; color: #fff;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.panel .x { cursor: pointer; color: #8b8e98; font-size: 16px; }
+.panel .x:hover { color: #fff; }
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > label { color: #8b8e98; font-size: 12px; }
+input[type="text"], input[type="number"] {
+  background: #17181c; border: 1px solid #33363e; color: #d6d8de;
+  padding: 6px 8px; border-radius: 4px; outline: none; width: 100%;
+}
+input:focus { border-color: #4c8dff; }
+.row { display: flex; gap: 6px; align-items: center; }
+.row .grow { flex: 1; }
+
+button {
+  background: #2b2d33; border: 1px solid #33363e; color: #d6d8de;
+  padding: 5px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+}
+button:hover { background: #34363d; }
+button.primary { background: #2f5fb3; border-color: #2f5fb3; color: #fff; }
+button.primary:hover { background: #3a6fc7; }
+button.danger:hover { background: #5a2b2b; border-color: #7a3a3a; }
+button:disabled { opacity: 0.4; cursor: default; }
+
+.avail-item {
+  padding: 7px 8px; border-radius: 4px; cursor: pointer; color: #b9bcc6;
+  display: flex; justify-content: space-between; gap: 8px;
+}
+.avail-item:hover { background: #26282e; color: #fff; }
+.avail-item small { color: #666a75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hint { color: #666a75; font-size: 12px; }
+.error { color: #e06c75; font-size: 12px; align-self: center; padding: 0 8px; }

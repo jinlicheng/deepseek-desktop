@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.kelvin.jai",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
@@ -12,7 +15,7 @@
       {
         "label": "main",
         "title": "JAI",
-        "url": "index.html",
+        "url": "/",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

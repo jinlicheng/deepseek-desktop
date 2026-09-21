@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+requirements.md
+
+# Agent tooling (local only)
+.kimi-code/

@@ -1,10 +1,11 @@
 mod config;
 mod tabs;
+mod tray;
 
 use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WindowEvent};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, RunEvent, WindowEvent};
 use tabs::{Panel, TabMenu, Tabs};
 
 /// 与前端 src/styles.css 中 #tabbar 的 height 保持一致
@@ -126,7 +127,7 @@ fn report_ui_error(message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             report_viewport,
@@ -143,11 +144,19 @@ pub fn run() {
             tabs::set_startup_count,
             tabs::set_panel,
         ])
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
+            // 关闭按钮 → 隐藏到托盘（Linux 未启用托盘，保持「关闭即退出」的默认行为）
+            WindowEvent::CloseRequested { api, .. } => {
+                if tray::enabled() && !tray::is_quitting() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
             // 窗口缩放时同步所有子 webview 的几何
-            if let WindowEvent::Resized(_) = event {
+            WindowEvent::Resized(_) => {
                 apply_bounds(window.app_handle());
             }
+            _ => {}
         })
         .setup(|app| {
             app.manage(TabGeometry::default());
@@ -156,6 +165,9 @@ pub fn run() {
             app.manage(Mutex::new(Tabs::load(config_path)));
 
             setup_menu_bar(app)?;
+            if tray::enabled() {
+                tray::setup(app.handle())?;
+            }
             tabs::reconcile(app.handle(), false);
             tabs::emit_state(app.handle());
             Ok(())
@@ -165,6 +177,21 @@ pub fn run() {
                 tabs::switch_to(app, tab_id);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| match event {
+        // 用户主动退出（Cmd+Q、菜单退出、注销等，code 为 None）→ 隐藏而非退出；
+        // 托盘「退出」置位 QUITTING 后放行，程序内调用 exit(0) 的 code 为 Some 也不拦截
+        RunEvent::ExitRequested { api, code, .. } => {
+            if tray::enabled() && code.is_none() && !tray::is_quitting() {
+                api.prevent_exit();
+                tray::hide_main_window(app_handle);
+            }
+        }
+        // macOS：点击 Dock 图标 → 唤回窗口
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => tray::show_main_window(app_handle),
+        _ => {}
+    });
 }

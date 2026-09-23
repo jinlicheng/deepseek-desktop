@@ -1,8 +1,17 @@
 <script setup>
 import { reactive, watch } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const props = defineProps({ state: Object });
-const emit = defineEmits(["close", "update", "delete", "move", "startup"]);
+const emit = defineEmits([
+  "close",
+  "update",
+  "delete",
+  "move",
+  "startup",
+  "download-dir",
+  "download-per-site",
+]);
 
 // 每行的草稿：输入过程不触发写盘，点「✓ 保存」才提交
 const drafts = reactive({});
@@ -18,6 +27,16 @@ watch(
   },
   { immediate: true }
 );
+
+async function chooseDownloadDir() {
+  const picked = await open({
+    directory: true,
+    multiple: false,
+    title: "选择下载目录",
+    defaultPath: props.state.download_dir || undefined,
+  });
+  if (typeof picked === "string" && picked) emit("download-dir", picked);
+}
 </script>
 
 <template>
@@ -61,5 +80,27 @@ watch(
     </div>
 
     <div class="hint">添加标签页请点标签栏上的「＋」。</div>
+
+    <div class="hint" style="margin-top: 6px">下载（所有站点共用）：</div>
+
+    <div class="field">
+      <label>下载目录</label>
+      <div class="row">
+        <span class="grow path" :title="state.download_dir || ''">
+          {{ state.download_dir || "系统默认下载目录" }}
+        </span>
+        <button @click="chooseDownloadDir">选择…</button>
+        <button v-if="state.download_dir" @click="emit('download-dir', null)">默认</button>
+      </div>
+    </div>
+
+    <label class="row" style="cursor: pointer">
+      <input
+        type="checkbox"
+        :checked="state.download_per_site"
+        @change="(e) => emit('download-per-site', e.target.checked)"
+      />
+      按站点建立子目录
+    </label>
   </div>
 </template>

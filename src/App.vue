@@ -9,7 +9,12 @@ import AvailablePanel from "./components/AvailablePanel.vue";
 
 const state = ref(null);
 const error = ref("");
+// 提示条：toast 保存内容（滑出期间保留，避免淡出时变空），toastShown 控制显隐
+const toast = ref(null);
+const toastShown = ref(false);
 let unlisten = null;
+let unlistenDownload = null;
+let toastTimer = null;
 
 onMounted(async () => {
   // 上报真实视口高度：Rust 侧据此校准 macOS 标题栏偏移（子 webview 的定位基准）
@@ -18,12 +23,18 @@ onMounted(async () => {
   unlisten = await listen("state-changed", (event) => {
     state.value = event.payload;
   });
+  unlistenDownload = await listen("download-finished", (event) => {
+    const { name, success } = event.payload;
+    showToast(success ? "下载完成" : "下载失败", success, name);
+  });
   window.addEventListener("resize", reportViewport);
   window.addEventListener("keydown", onKeydown);
 });
 
 onUnmounted(() => {
   if (unlisten) unlisten();
+  if (unlistenDownload) unlistenDownload();
+  clearTimeout(toastTimer);
   window.removeEventListener("resize", reportViewport);
   window.removeEventListener("keydown", onKeydown);
 });
@@ -37,6 +48,27 @@ function onKeydown(e) {
   if (e.key === "Escape" && !["INPUT", "TEXTAREA"].includes(e.target.tagName)) {
     run(() => invoke("set_panel", { panel: null }));
   }
+}
+
+/// 顶部滑入的下载提示：2.6 秒后自动收起（内容保留，等淡出结束）
+function showToast(text, success = true, detail = "") {
+  toast.value = { text, success, detail };
+  toastShown.value = true;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastShown.value = false;
+  }, 2600);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  toastShown.value = false;
+}
+
+/// 「立即查看」：在文件管理器中定位最近一次下载的文件
+function revealDownload() {
+  hideToast();
+  run(() => invoke("reveal_last_download"));
 }
 
 /// 三个入口按钮统一为「点击切换」：同一个面板已打开时再点就关闭
@@ -55,6 +87,18 @@ async function run(action) {
 </script>
 
 <template>
+  <div
+    class="toast"
+    :class="{ show: toastShown, fail: toast && !toast.success }"
+    :title="toast ? toast.detail : ''"
+  >
+    <span class="toast-icon">{{ toast && !toast.success ? "!" : "✓" }}</span>
+    <span class="toast-text">{{ toast ? toast.text : "" }}</span>
+    <button v-if="toast && toast.success" class="toast-action" @click="revealDownload">
+      立即查看
+    </button>
+    <button class="toast-close" @click="hideToast">×</button>
+  </div>
   <TabBar
     v-if="state"
     :state="state"
@@ -91,6 +135,8 @@ async function run(action) {
       @delete="(id) => run(() => invoke('delete_tab', { id }))"
       @move="(id, up) => run(() => invoke('move_tab', { id, up }))"
       @startup="(n) => run(() => invoke('set_startup_count', { n }))"
+      @download-dir="(dir) => run(() => invoke('set_download_dir', { dir }))"
+      @download-per-site="(enabled) => run(() => invoke('set_download_per_site', { enabled }))"
     />
   </div>
 </template>

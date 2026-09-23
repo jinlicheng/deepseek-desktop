@@ -1,4 +1,5 @@
 mod config;
+mod download;
 mod tabs;
 mod tray;
 
@@ -7,12 +8,13 @@ use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, RunEvent, WindowEvent};
 use tabs::{Panel, TabMenu, Tabs};
+use tauri_plugin_opener::OpenerExt;
 
 /// 与前端 src/styles.css 中 #tabbar 的 height 保持一致
 const TABBAR_HEIGHT: f64 = 40.0;
 /// 右侧停靠面板的宽度（与前端 .panel 的 width 一致）
 const PANEL_WIDTH: f64 = 340.0;
-const WIN_LABEL: &str = "main";
+pub(crate) const WIN_LABEL: &str = "main";
 const MENU_TAB_PREFIX: &str = "mtab-";
 
 #[derive(Default)]
@@ -125,13 +127,42 @@ fn report_ui_error(message: String) {
     eprintln!("[ui-error] {message}");
 }
 
+/// 下载提示条上的「立即查看」：在文件管理器里定位最近一次下载的文件
+#[tauri::command]
+fn reveal_last_download(app: AppHandle) -> Result<(), String> {
+    let path = download::last_download().ok_or("还没有下载记录")?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+/// 下载链路的诊断日志：默认不写（`JAI_DL_LOG=1` 启动时才写 /tmp/jai_dl.log）。
+/// 某些站点（如 Kimi）的下载触发方式很隐蔽，排查时靠它看走了哪条路。
+pub(crate) fn debug_log(line: &str) {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("JAI_DL_LOG").is_ok()) {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/jai_dl.log")
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             report_viewport,
             report_ui_error,
+            reveal_last_download,
             tabs::get_state,
             tabs::switch_tab,
             tabs::reload_tab,
@@ -143,6 +174,8 @@ pub fn run() {
             tabs::move_tab,
             tabs::set_startup_count,
             tabs::set_panel,
+            tabs::set_download_dir,
+            tabs::set_download_per_site,
         ])
         .on_window_event(|window, event| match event {
             // 关闭按钮 → 隐藏到托盘（Linux 未启用托盘，保持「关闭即退出」的默认行为）
@@ -170,6 +203,7 @@ pub fn run() {
             }
             tabs::reconcile(app.handle(), false);
             tabs::emit_state(app.handle());
+
             Ok(())
         })
         .on_menu_event(|app, event| {

@@ -79,3 +79,78 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .hint { color: #666a75; font-size: 12px; }
 .error { color: #e06c75; font-size: 12px; align-self: center; padding: 0 8px; }
+
+.path {
+  color: #b9bcc6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+/* 下载提示：半透明圆角小胶囊，居中悬浮在标签栏那一行。必须留在标签栏这 40px 内——
+   下方区域被原生子 webview 盖住，DOM 在那里看不见。 */
+.toast {
+  position: fixed;
+  top: 6px;
+  left: 50%;
+  transform: translate(-50%, -150%);
+  max-width: 72%;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 0 8px;
+  border-radius: 14px;
+  background: rgba(30, 32, 38, 0.72);
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  color: #f2f3f5;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 20;
+  transition: transform 0.24s cubic-bezier(0.2, 0.9, 0.3, 1.15), opacity 0.24s ease;
+}
+.toast.show {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.toast-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #2ea043;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+.toast.fail .toast-icon { background: #d1544f; }
+.toast-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toast-action,
+.toast-close {
+  flex: none;
+  border: 0;
+  background: none;
+  color: #6ea8fe;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.toast-action:hover { text-decoration: underline; }
+.toast-close {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 15px;
+}
+.toast-close:hover { color: #fff; }

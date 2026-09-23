@@ -2,27 +2,61 @@
 
 [中文](README.md) | **English**
 
-A desktop app that puts the web versions of AI tools in one window: multiple tabs, with a configurable site list.
+A desktop app that wraps the web versions of popular AI assistants: one window, several tabs, sites you configure, downloads in one place.
 
-> Unofficial project. Not affiliated with, endorsed by, or supported by DeepSeek, Moonshot AI (Kimi) or any other site it can open.
+> Unofficial project. Not affiliated with, endorsed by, or authorized by DeepSeek, Moonshot AI (Kimi), Alibaba (Qwen) or any other site it can open.
 
 ## Features
 
-- **Configurable tab set**: sites live in a config file and can be added, edited, reordered or removed
-- **Opens the first N tabs on startup** (N can be 0–9); the rest are one click away in the **▾** list
-- **Two kinds of tabs**
-  - Pinned: come from the config, have no close button, are removed through the config
-  - Ephemeral: opened from **▾** or added without saving, show a **×**, and are disposed when closed
-- Four entries in the tab bar: **⟳** reload the active tab, **＋** add a tab, **▾** open a configured site, **⚙** settings (clicking the same button closes the panel again)
-- Switch tabs with `Cmd/Ctrl + 1~9` (the **标签** menu is rebuilt to match the open tabs)
-- In-site links open in the current tab; external links go to the system browser
-- At most 9 tabs open at once (the config list itself is unlimited)
+### Several AIs in one window
 
-On first run a built-in default config (DeepSeek + Kimi) is used; the config file is written on the first modification.
+- Tabbed wrapper: keep DeepSeek, Kimi, Qwen, Doubao … open together, or add any http/https URL
+- Up to 9 tabs open at once; the configured list itself can be as long as you like
+- Links inside a site stay in that tab; external links go to your system browser
 
-## Configuration file
+### Sites you configure
 
-`tabs.json` — you can edit it by hand (it is picked up on the next launch):
+- Add, rename, re-point, reorder or delete sites — the list order is the tab order
+- Open the first N tabs on launch (N = 0–9); the rest wait in the tab bar's **▾** list
+- Two kinds of tabs:
+  - **Pinned**: comes from your configuration, has no close button — remove it in Settings
+  - **Temporary**: opened from **▾** (or added without "save to config"); it has an **×** and is gone once closed
+
+### Downloads all land in one folder
+
+- Every site's downloads go to the folder you pick (the system download folder by default) — change it any time in Settings
+- Optional "one subfolder per site"; duplicate names get ` (1)`, ` (2)`
+- When a download finishes, a small translucent toast slides out of the tab bar: **✓ 下载完成　立即查看　×**
+  - **立即查看** reveals the file in Finder / File Explorer
+  - **×** dismisses it; otherwise it disappears after 2.6 seconds
+
+### Closing the window doesn't quit (system tray)
+
+- The window's close button hides it to the system tray instead of quitting, so an answer in progress isn't interrupted
+- Tray menu: **显示主窗口** (show main window) / **退出** (quit) — the app only quits from there
+- On macOS, clicking the Dock icon brings the window back; on Linux the tray is disabled, so closing quits
+
+### Tab bar controls
+
+**⟳** reload current tab · **＋** add a tab · **▾** open a configured site · **⚙** settings (click the same button again to close the panel)
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Cmd/Ctrl + 1~9` | Switch to tab 1–9 |
+| `Esc` | Close the side panel |
+
+On macOS there is also a **标签** (Tabs) menu that mirrors the currently open tabs.
+
+## Using it
+
+1. **First launch** — DeepSeek and Kimi are preconfigured; just sign in (phone number or QR code is recommended)
+2. **Add a site** — click **＋** in the tab bar, fill in a name and URL; tick "save to config" to keep it for next time
+3. **Change sites** — click **⚙** to rename, re-point, reorder or delete, and to set how many tabs open on launch
+4. **Change the download folder** — **⚙** → download folder → **选择…** (choose); **默认** (default) restores the system folder
+
+The configuration file `tabs.json` can also be edited by hand (it takes effect on the next launch):
 
 | Platform | Path |
 | --- | --- |
@@ -30,90 +64,23 @@ On first run a built-in default config (DeepSeek + Kimi) is used; the config fil
 | Linux | `~/.config/com.kelvin.jai/tabs.json` |
 | Windows | `%APPDATA%\com.kelvin.jai\tabs.json` |
 
-```json
-{
-  "startup_count": 2,
-  "tabs": [
-    { "id": "t_deepseek", "name": "DeepSeek", "url": "https://chat.deepseek.com" },
-    { "id": "t_kimi", "name": "Kimi", "url": "https://www.kimi.com" }
-  ]
-}
-```
+## Getting a build
 
-- `startup_count`: how many of the leading tabs are opened automatically; the rest go to the **▾** list
-- `tabs`: the order defines the tab order; `id` only needs to be unique in the file, `url` must be http/https
+The repository ships no prebuilt binaries. Pushing to `main` (or triggering it manually) runs the `build` workflow, which builds macOS, Windows and Ubuntu in parallel — grab the artifacts from that run.
 
-## Requirements
+> The installers are not code-signed: on macOS, right-click → Open the first time; on Windows, accept the SmartScreen prompt ("Run anyway").
 
-| Platform | Install |
-| --- | --- |
-| macOS | Xcode Command Line Tools |
-| Windows | Visual Studio C++ Build Tools; WebView2 runtime (bundled with Windows 11) |
-| Linux | `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` |
-
-You also need Rust (via rustup) and Node.js 24+. The frontend is Vue 3 + Vite, installed by `npm install`.
-
-## Development and build
+## Running locally (developers)
 
 ```bash
 npm install
-npm run tauri dev     # dev mode (Vite HMR + debug build)
-npm run tauri build   # release build
+npm run tauri dev
 ```
 
-During development prefer a debug build (much faster): `npm run tauri build -- --debug --bundles app`.
+During development, prefer a debug build (much faster): `npm run tauri build -- --debug --bundles app`.
 
-Build output:
+## Notes and known issues
 
-| Platform | Path |
-| --- | --- |
-| macOS | `src-tauri/target/release/bundle/macos/JAI.app`, `bundle/dmg/JAI_*.dmg` |
-| Windows | `src-tauri/target/release/bundle/nsis/JAI_*-setup.exe` |
-| Linux | `src-tauri/target/release/bundle/deb/JAI_*.deb` |
-
-## Project layout
-
-```
-index.html                          Vite entry
-vite.config.js                      Vite config (fixed port 1420, matching devUrl)
-src/App.vue                         Root component: subscribes to state-changed, dispatches
-                                    commands, switches panels
-src/components/TabBar.vue           Tab bar: tab list + ⟳ / ＋ / ▾ / ⚙
-src/components/TabDialog.vue        Add-tab form (name / url / save-to-config)
-src/components/AvailablePanel.vue   Configured sites that are not currently open
-src/components/SettingsPanel.vue    Config management: rename, change url, reorder, delete,
-                                    startup count
-src-tauri/src/lib.rs                Window and geometry, panel state, bootstrap
-src-tauri/src/tabs.rs               Tab state machine, IPC commands, menu rebuild,
-                                    webview lifecycle
-src-tauri/src/config.rs             Config model and persistence (tabs.json)
-src-tauri/tauri.conf.json           Window configuration and app metadata
-.github/workflows/build.yml         Three-platform CI build
-```
-
-## Implementation notes
-
-The app layers native child webviews on top of a local Vue page: the window's own webview draws the tab bar and panels, while each site runs in a native child webview placed in a fixed content area. The following pitfalls were hit during development and are handled in the code:
-
-- **Multiple webviews require the `unstable` feature**: `WebviewBuilder`, `Window::add_child` and `Manager::get_webview` only exist behind `tauri = { version = "2", features = ["unstable"] }`.
-- **The frontend must report `window.innerHeight`** (`report_viewport`): on macOS `window.inner_size()` includes the title bar height, while child webviews are positioned relative to a view that includes it too; without the compensation they shift roughly 28px up and cover the tab bar (full screen happens to work because there is no title bar). The compensation is window height minus page viewport height, and it is automatically 0 in full screen and on Windows/Linux. **Removing that report reintroduces the bug.**
-- **Native child webviews always float above the DOM**: panels and forms cannot overlay a web page, so the right-hand panels dock and the webviews give up 340px of width (subtracted in the Rust geometry code).
-- **All geometry changes go through `apply_bounds`**, which computes, records (`last_applied`) and applies. Previously `reconcile` changed geometry without updating the record, which made the deduplication skip a needed update and left panels hidden after adding or deleting a tab. Keep new geometry logic on that single path.
-- **Do not create webviews from commands or event handlers on Windows** (the Tauri docs state this deadlocks): every create/destroy/recreate is posted to the main thread (`run_on_main_thread`).
-- **Windows/Linux have no default menu**: Tauri's default menu is macOS-only. The code builds its own menu when `app.menu()` is `None`, otherwise the app panics at startup.
-- **Do not rely on `Webview::url()`**: wry 0.55.1 unwraps a nil URL on `about:blank` pages and panics (`wkwebview/mod.rs:1349`). Reloading uses `Webview::reload()`; placeholder state is tracked in Rust.
-- **Vue swallows render errors** (you just see an empty area): `src/main.js` installs an `errorHandler` that reports them to Rust, which prints `[ui-error] ...`. That is how frontend/backend field mismatches surface.
-
-## Known caveats
-
-- Installers are not code signed: on macOS, right-click → Open the first time; on Windows, SmartScreen shows a warning — choose "Run anyway".
-- Prefer **phone number or QR code** sign-in: Google sign-in is rejected inside embedded webviews (Google's policy, unrelated to this app).
-- Linux uses WebKitGTK, which renders modern sites less reliably than macOS/Windows; minor style differences are possible.
-
-## Continuous integration
-
-Pushing to `main` or manually triggering the `build` workflow builds Windows, macOS and Ubuntu in parallel. Artifacts are available on the workflow run page.
-
-## Editor setup (optional)
-
-- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri extension](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- **Google sign-in** is refused inside an embedded window (Google's own security policy, not this app's), so use phone number or QR code
+- Linux uses WebKitGTK, whose rendering is weaker than macOS/Windows — some pages may look slightly different
+- The user interface is currently Chinese only

@@ -1,9 +1,13 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::menu::{MenuItemBuilder, Submenu};
-use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, Wry};
+use tauri::webview::{DownloadEvent, PageLoadEvent};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl, Wry};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::config::{new_tab_id, AppConfig, TabConfig};
@@ -118,6 +122,8 @@ pub struct TabsSnapshot {
     pub active: Option<String>,
     pub available: Vec<TabConfig>,
     pub panel: Option<&'static str>,
+    pub download_dir: Option<String>,
+    pub download_per_site: bool,
 }
 
 pub fn snapshot(app: &AppHandle) -> TabsSnapshot {
@@ -130,6 +136,8 @@ pub fn snapshot(app: &AppHandle) -> TabsSnapshot {
         active: tabs.active.clone(),
         available: tabs.available(),
         panel: crate::current_panel(app).map(|p| p.as_str()),
+        download_dir: tabs.config.download_dir.clone(),
+        download_per_site: tabs.config.download_per_site,
     }
 }
 
@@ -214,7 +222,10 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
                 None => {
                     let Ok(url) = t.url.parse() else { continue };
                     let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(url))
-                        .on_new_window(new_window_handler(app.clone()));
+                        .initialization_script_for_all_frames(crate::download::injected_script())
+                        .on_new_window(new_window_handler(app.clone()))
+                        .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
+                        .on_download(crate::download::handler(app.clone()));
                     win.add_child(builder, position, size).ok()
                 }
             };
@@ -234,8 +245,72 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
     });
 }
 
+/// 标签页内的导航拦截：
+/// 站点触发下载还有另外两种方式——隐藏 iframe 的 `src`、或直接跳转过去（不带 target）。
+/// 这两种都会走「导航」，而 wry 只在 MIME 无法显示时才判成下载，所以 `image/png`
+/// 这类能显示的附件会被直接显示出来、什么都不会保存。这里把「跨域 + 像文件」的导航
+/// 拦下来，交给同一套下载兜底（它会按响应头决定是文件还是网页）。
+///
+/// 另外它还兼作页面脚本的回传通道：注入脚本遇到**跨域**文件地址时没法自己取（CORS），
+/// 就用 [`CHANNEL_HOST`] 下的哨兵地址把地址发回来，这里解析后走同一条兜底路径。
+fn tab_navigation_handler(
+    app: AppHandle,
+    label: String,
+) -> impl Fn(&Url) -> bool + Send + Sync + 'static {
+    move |url| {
+        if url.host_str() == Some(CHANNEL_HOST) {
+            let path = url.path().trim_start_matches('/');
+            if let Some(raw) = path.strip_prefix("dl-") {
+                // 注入脚本用 encodeURIComponent 编码，这里要显式解码
+                // （path_segments() 不做百分号解码）
+                let decoded = crate::download::decode_percent(raw).unwrap_or_default();
+                if let Ok(target) = Url::parse(&decoded) {
+                    crate::debug_log(&format!("[page-download] {target}"));
+                    download_external(&app, target);
+                }
+            }
+            return false;
+        }
+        if !matches!(url.scheme(), "http" | "https") {
+            return true;
+        }
+        crate::debug_log(&format!("[nav] {label} {url}"));
+        let here = app
+            .get_webview(&label)
+            .and_then(|wv| wv.url().ok())
+            .and_then(|u| u.host_str().map(str::to_string));
+        if here.as_deref() != url.host_str() && looks_like_file(url) {
+            crate::debug_log(&format!("[nav-download] {url}"));
+            download_external(&app, url.clone());
+            return false;
+        }
+        true
+    }
+}
+
+/// 像文件的地址：路径末段带常见扩展名，或查询串里有下载相关关键字
+fn looks_like_file(url: &Url) -> bool {
+    let extensions = crate::download::FILE_EXTENSIONS;
+    let path = url.path().to_ascii_lowercase();
+    let last = path.rsplit('/').next().unwrap_or_default();
+    if let Some((_, ext)) = last.rsplit_once('.') {
+        if extensions.contains(&ext) {
+            return true;
+        }
+    }
+    url.query_pairs().any(|(k, v)| {
+        let k = k.to_ascii_lowercase();
+        let v = v.to_ascii_lowercase();
+        k.contains("disposition")
+            || k.contains("attachment")
+            || k.contains("download")
+            || k.contains("filename")
+            || v.contains("attachment")
+    })
+}
+
 /// target="_blank" / window.open 统一处理：
-/// 按域名路由到对应标签的 webview，无匹配则交给系统浏览器
+/// 按域名路由到对应标签的 webview；跨域地址先按「下载」试一次，不是下载才交给系统浏览器
 fn new_window_handler(
     app: AppHandle,
 ) -> impl Fn(Url, tauri::webview::NewWindowFeatures) -> tauri::webview::NewWindowResponse<Wry>
@@ -258,15 +333,241 @@ fn new_window_handler(
                 .map(|t| t.id.clone())
         };
         match target.and_then(|id| app.get_webview(&label_of(&id))) {
+            // 站内地址：留在标签页里打开
             Some(wv) => {
+                crate::debug_log(&format!("[new-window] {url} -> 站内标签 {}", wv.label()));
                 let _ = wv.navigate(url);
             }
             None => {
-                let _ = app.opener().open_url(url.as_str(), None::<&str>);
+                crate::debug_log(&format!("[new-window] {url} -> 下载"));
+                download_external(&app, url);
             }
         }
         tauri::webview::NewWindowResponse::Deny
     }
+}
+
+/// 跨域/带签名的文件地址：先用 Rust 原生 HTTP 抓（页面 fetch 会被 CORS 拦、能显示的类型
+/// WebView 又不会下载），失败再退回隐藏 webview 兜底，最后才交给系统浏览器。
+fn download_external(app: &AppHandle, url: Url) {
+    let site = active_tab_id(app).unwrap_or_default();
+    let label = format!("dl_{site}__{}", next_helper_id());
+    let app_for_thread = app.clone();
+    let url_for_thread = url.clone();
+    std::thread::spawn(move || {
+        match crate::download::fetch_native(&app_for_thread, &label, &url_for_thread) {
+            Ok(path) => crate::debug_log(&format!("[native-download] ok {}", path.display())),
+            Err(e) => {
+                crate::debug_log(&format!("[native-download] 失败: {e}，退回 webview 兜底"));
+                let fallback_app = app_for_thread.clone();
+                let _ = app_for_thread.run_on_main_thread(move || {
+                    open_external(&fallback_app, url_for_thread);
+                });
+            }
+        }
+    });
+}
+
+/// 「还没判成下载」的兜底 webview：只有它们才允许被超时清理，
+/// 否则可能打断正在进行中的下载
+fn probing() -> &'static Mutex<HashSet<String>> {
+    static PROBING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    PROBING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 页面脚本 → Rust 的回传通道主机（`.invalid` 是保留域名，绝不会真的解析请求）
+const CHANNEL_HOST: &str = "jai-dl.invalid";
+
+/// 跨域新窗口请求的下载兜底。
+///
+/// 站点（如 Kimi 的文件卡片）的下载按钮是 `<a href="<CDN 地址>" target="_blank">`，
+/// WebKit 把它判成「新窗口」而不是下载，于是我们拿不到它的响应头——按老办法交给系统
+/// 浏览器，文件就落到浏览器自己的下载目录（甚至是只被浏览器打开、根本没保存）。
+///
+/// 这里改成一个隐藏的小 webview 来处理：
+/// 1. 先用它的**站点根地址**加载一次，拿到一个可执行脚本的文档（跨域时同源脚本才读得到响应头）；
+/// 2. 注入脚本对文件地址做同源 fetch：带 `Content-Disposition: attachment` 或不是 HTML 的，
+///    取回内容后用 `<a download>` 触发下载（wry 只看 MIME 决定是否下载，图片这类能显示的类型
+///    会直接被显示出来而不会下载，所以必须绕这一圈）；
+/// 3. 不带附件的 HTML 说明是普通网页（外链）→ 用哨兵地址通知 Rust 交回系统浏览器。
+fn open_external(app: &AppHandle, url: Url) {
+    if !matches!(url.scheme(), "http" | "https") {
+        let _ = app.opener().open_url(url.as_str(), None::<&str>);
+        return;
+    }
+    let Some(origin) = origin_of(&url) else {
+        let _ = app.opener().open_url(url.as_str(), None::<&str>);
+        return;
+    };
+    let helper = Helper {
+        label: format!(
+            "dl_{}__{}",
+            active_tab_id(app).unwrap_or_default(),
+            next_helper_id()
+        ),
+        url,
+    };
+    probing().lock().unwrap().insert(helper.label.clone());
+
+    let window_app = app.clone();
+    let helper_for_build = helper.clone();
+    let script = probe_js(helper.url.as_str());
+    let _ = app.run_on_main_thread(move || {
+        let Some(win) = window_app.get_window(WIN_LABEL) else {
+            return;
+        };
+        let download_app = window_app.clone();
+        let download_helper = helper_for_build.clone();
+        let nav_app = window_app.clone();
+        let nav_helper = helper_for_build.clone();
+        let builder = tauri::WebviewBuilder::new(
+            &helper_for_build.label,
+            WebviewUrl::External(origin),
+        )
+        .on_download(move |wv, event| {
+            if matches!(event, DownloadEvent::Requested { .. }) {
+                crate::debug_log(&format!("[helper] {} 判定为下载", download_helper.url));
+                probing().lock().unwrap().remove(&download_helper.label);
+            }
+            let finished = matches!(event, DownloadEvent::Finished { .. });
+            let keep = (crate::download::handler(download_app.clone()))(wv, event);
+            if finished {
+                download_helper.close(&download_app);
+                // 兜底：下载结束事件没到也不能把 webview 留在后台
+                download_helper.close_later(&download_app);
+            }
+            keep
+        })
+        .on_page_load(move |wv, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                let _ = wv.eval(&script);
+            }
+        })
+        .on_navigation(move |url| {
+            if url.host_str() == Some(CHANNEL_HOST) {
+                let why = url.path().trim_start_matches('/').to_string();
+                crate::debug_log(&format!("[probe] {} -> {why}", nav_helper.url));
+                if why == "enter" {
+                    // 脚本跑起来了：不再需要超时兜底（大文件要慢慢取）
+                    probing().lock().unwrap().remove(&nav_helper.label);
+                } else {
+                    let reason = if why == "external" { "是网页（外链）" } else { "取内容失败" };
+                    nav_helper.to_browser(&nav_app, reason);
+                }
+                return false;
+            }
+            true
+        });
+        match win.add_child(
+            builder,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1.0, 1.0),
+        ) {
+            Ok(wv) => {
+                let _ = wv.hide();
+            }
+            Err(_) => helper_for_build.to_browser(&window_app, "兜底 webview 创建失败"),
+        }
+    });
+
+    // 超时兜底：脚本没能跑起来（文档不可执行、根地址也加载不出来等）就交回系统浏览器
+    let timeout_app = app.clone();
+    let timeout_helper = helper;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(12));
+        if probing().lock().unwrap().contains(&timeout_helper.label) {
+            timeout_helper.to_browser(&timeout_app, "超时（脚本未运行）");
+        }
+    });
+}
+
+/// 站点根地址（scheme://host[:port]/）：同源，用来承载探测脚本
+fn origin_of(url: &Url) -> Option<Url> {
+    let host = url.host_str()?;
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{}://{host}{port}/", url.scheme()).parse().ok()
+}
+
+/// 探测脚本：同源取回文件，按响应头决定「下载」还是「交回浏览器」。
+/// 结果用 `CHANNEL_HOST` 下的哨兵地址回传给 Rust（脚本里的导航会被取消，只是当信号用）。
+fn probe_js(file_url: &str) -> String {
+    let quoted = serde_json::to_string(file_url).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(async () => {{
+  const mark = (m) => {{ try {{ location.href = 'https://{CHANNEL_HOST}/' + m; }} catch (e) {{}} }};
+  mark('enter');
+  try {{
+    const res = await fetch({quoted}, {{ credentials: 'same-origin' }});
+    const cd = res.headers.get('content-disposition') || '';
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (!/attachment/i.test(cd) && ct.includes('html')) return mark('external');
+    const blob = await res.blob();
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+    let name = m ? decodeURIComponent(m[1]) : '';
+    if (!name) {{
+      const last = decodeURIComponent(new URL({quoted}).pathname.split('/').filter(Boolean).pop() || '');
+      name = last.includes('.') ? last : 'download';
+    }}
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }} catch (e) {{
+    mark('error');
+  }}
+}})()"#
+    )
+}
+
+/// 下载兜底的隐藏 webview
+#[derive(Clone)]
+struct Helper {
+    label: String,
+    url: Url,
+}
+
+impl Helper {
+    /// 收尾：关闭兜底 webview（关闭要投递到主线程，调用点可能正在 webview 回调里）
+    fn close(&self, app: &AppHandle) {
+        probing().lock().unwrap().remove(&self.label);
+        let label = self.label.clone();
+        let app = app.clone();
+        let _ = app.clone().run_on_main_thread(move || {
+            if let Some(wv) = app.get_webview(&label) {
+                let _ = wv.close();
+            }
+        });
+    }
+
+    /// 兜底清理：脚本卡住（大文件、请求挂起）时也要把隐藏 webview 收掉
+    fn close_later(&self, app: &AppHandle) {
+        let this = self.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(600));
+            this.close(&app);
+        });
+    }
+
+    /// 判定为外链（或探测失败）：关掉兜底 webview，按原行为交给系统浏览器
+    fn to_browser(&self, app: &AppHandle, why: &str) {
+        crate::debug_log(&format!("[helper] {} {why}", self.url));
+        self.close(app);
+        let _ = app.opener().open_url(self.url.as_str(), None::<&str>);
+    }
+}
+
+fn next_helper_id() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+fn active_tab_id(app: &AppHandle) -> Option<String> {
+    let state = app.state::<Mutex<Tabs>>();
+    let tabs = state.lock().unwrap();
+    tabs.active.clone()
 }
 
 fn normalize_url(input: &str) -> Result<String, String> {
@@ -568,4 +869,30 @@ pub fn set_panel(app: AppHandle, panel: Option<String>) {
     set_panel_str(&app, panel.as_deref().and_then(Panel::parse));
     crate::apply_bounds(&app);
     emit_state(&app);
+}
+
+/// 设置统一下载目录；传 None（或空串）表示回到系统默认下载目录
+#[tauri::command]
+pub fn set_download_dir(app: AppHandle, dir: Option<String>) -> Result<(), String> {
+    {
+        let state = app.state::<Mutex<Tabs>>();
+        let mut tabs = state.lock().unwrap();
+        tabs.config.download_dir = dir.filter(|d| !d.trim().is_empty());
+        tabs.save()?;
+    }
+    emit_state(&app);
+    Ok(())
+}
+
+/// 设置下载时是否按站点建立子目录
+#[tauri::command]
+pub fn set_download_per_site(app: AppHandle, enabled: bool) -> Result<(), String> {
+    {
+        let state = app.state::<Mutex<Tabs>>();
+        let mut tabs = state.lock().unwrap();
+        tabs.config.download_per_site = enabled;
+        tabs.save()?;
+    }
+    emit_state(&app);
+    Ok(())
 }

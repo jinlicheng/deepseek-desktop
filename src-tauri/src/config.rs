@@ -17,6 +17,10 @@ pub struct AppConfig {
     /// 启动时自动打开配置列表的前 N 个标签
     pub startup_count: usize,
     pub tabs: Vec<TabConfig>,
+    /// 所有站点共用的下载目录；None 表示系统默认下载目录
+    pub download_dir: Option<String>,
+    /// 下载时是否按站点建立子目录
+    pub download_per_site: bool,
 }
 
 impl Default for AppConfig {
@@ -35,6 +39,8 @@ impl Default for AppConfig {
                     url: "https://www.kimi.com".into(),
                 },
             ],
+            download_dir: None,
+            download_per_site: false,
         }
     }
 }

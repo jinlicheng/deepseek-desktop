@@ -68,6 +68,8 @@ macOS 菜单栏还有「标签」菜单，内容与当前打开的标签同步�
 仓库不附带预编译产物。推送到 `main` 分支（或手动触发）会跑 `build` 工作流，并行构建 macOS、Windows、Ubuntu 三个平台，产物在该次运行的 Artifacts 中下载。
 
 > 安装包未做代码签名：macOS 首次打开需右键 → 打开；Windows 会弹出 SmartScreen 提示，选「仍要运行」即可。
+>
+> **只有 macOS 经过实际测试**：Windows 与 Linux 的安装包能正常构建（CI 三平台均通过），但还没有在真机上运行验证过。
 
 ## 本地运行（开发者）
 
@@ -80,6 +82,7 @@ npm run tauri dev
 
 ## 已知事项
 
+- **只在 macOS 上实际测试过**：Windows / Linux 的安装包能构建通过，但没有真机验证——欢迎在 issue 里反馈你在这些平台上的结果
 - **Google 登录**在嵌入式窗口里会被 Google 拒绝（对方的安全策略，与本应用无关），请改用手机号或扫码登录
 - Linux 使用 WebKitGTK，渲染兼容性弱于 macOS / Windows，个别页面可能有样式差异
 - 界面文案目前只有中文

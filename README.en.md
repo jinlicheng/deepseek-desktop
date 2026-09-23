@@ -68,6 +68,8 @@ The configuration file `tabs.json` can also be edited by hand (it takes effect o
 The repository ships no prebuilt binaries. Pushing to `main` (or triggering it manually) runs the `build` workflow, which builds macOS, Windows and Ubuntu in parallel — grab the artifacts from that run.
 
 > The installers are not code-signed: on macOS, right-click → Open the first time; on Windows, accept the SmartScreen prompt ("Run anyway").
+>
+> **Only macOS has actually been tested.** The Windows and Linux packages build fine (all three platforms pass in CI) but have not been run on real machines yet.
 
 ## Running locally (developers)
 
@@ -80,6 +82,7 @@ During development, prefer a debug build (much faster): `npm run tauri build -- 
 
 ## Notes and known issues
 
+- **Tested on macOS only** — the Windows/Linux packages build, but have not been verified on real machines; reports in an issue are very welcome
 - **Google sign-in** is refused inside an embedded window (Google's own security policy, not this app's), so use phone number or QR code
 - Linux uses WebKitGTK, whose rendering is weaker than macOS/Windows — some pages may look slightly different
 - The user interface is currently Chinese only

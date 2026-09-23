@@ -55,11 +55,11 @@ async function chooseDownloadDir() {
     </div>
 
     <div v-if="state.tabs.length === 0" class="hint">
-      配置列表为空。点标签栏上的「＋」添加站点，勾选「保存到配置」即可常驻。
+      配置列表为空。点标签栏上的「＋」添加站点，勾选「保存到配置」即可留到下次启动。
     </div>
 
     <div v-else class="hint">
-      配置列表（顺序即启动顺序，前 N 个自动打开，其余收在「▾」里）：
+      配置列表（顺序即启动顺序，启动时自动打开前 N 个，其余收在「▾」里；拖拽标签栏只改当前顺序，这里的 ↑↓ 改的是启动顺序）：
     </div>
 
     <div v-for="(t, i) in state.tabs" :key="t.id" class="field" style="gap: 6px">

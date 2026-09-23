@@ -16,14 +16,12 @@ use crate::{set_panel_str, MENU_TAB_PREFIX, WIN_LABEL};
 /// 同时打开的标签页上限（快捷键 Cmd/Ctrl+1~9 也按此设计）
 pub const MAX_OPEN_TABS: usize = 9;
 
-/// 当前打开的一个标签页
+/// 当前打开的一个标签页。数组顺序就是标签栏顺序，也是唯一的排序真相
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenTab {
     pub id: String,
     pub name: String,
     pub url: String,
-    /// 常驻 = 来自配置；临时 = 下拉打开或未勾选保存
-    pub pinned: bool,
 }
 
 /// 标签页集合 + 应用配置（被 manage 进应用状态）
@@ -81,7 +79,6 @@ impl Tabs {
                 id: t.id.clone(),
                 name: t.name.clone(),
                 url: t.url.clone(),
-                pinned: true,
             })
             .collect();
         let active = open.first().map(|t| t.id.clone());
@@ -639,7 +636,6 @@ pub fn open_available(app: AppHandle, id: String) -> Result<(), String> {
                 id: cfg.id,
                 name: cfg.name,
                 url: cfg.url,
-                pinned: false,
             });
         }
         tabs.active = Some(id);
@@ -659,8 +655,8 @@ pub fn close_tab(app: AppHandle, id: String) -> Result<(), String> {
         let Some(pos) = tabs.open.iter().position(|t| t.id == id) else {
             return Ok(());
         };
-        if tabs.open[pos].pinned {
-            return Err("常驻标签页不能关闭，可在设置中删除".into());
+        if tabs.open.len() <= 1 {
+            return Err("至少保留一个标签页".into());
         }
         tabs.open.remove(pos);
         if tabs.active.as_deref() == Some(id.as_str()) {
@@ -704,7 +700,6 @@ pub fn add_tab(app: AppHandle, name: String, url: String, save: bool) -> Result<
                 id: new_id.clone(),
                 name,
                 url,
-                pinned: save,
             });
             tabs.active = Some(new_id.clone());
             true
@@ -806,21 +801,14 @@ pub fn move_tab(app: AppHandle, id: String, up: bool) -> Result<(), String> {
             tabs.config.tabs.swap(pos, new_pos);
         }
         tabs.save()?;
-        // 已打开的常驻标签按配置顺序重排（临时标签保持在尾部，sort_by_key 稳定）
-        let order: Vec<String> = tabs.config.tabs.iter().map(|t| t.id.clone()).collect();
-        tabs.open.sort_by_key(|o| {
-            if !o.pinned {
-                usize::MAX
-            } else {
-                order.iter().position(|x| x == &o.id).unwrap_or(usize::MAX)
-            }
-        });
     }
     reconcile(&app, false);
     emit_state(&app);
     Ok(())
 }
 
+/// 设置「启动时自动打开前 N 个」。只补不删：确保配置前 N 个都在标签栏里（缺的追加到末尾），
+/// 不主动关掉其它已打开的标签——调个数字就把在用的标签关掉太意外。
 #[tauri::command]
 pub fn set_startup_count(app: AppHandle, n: usize) -> Result<(), String> {
     {
@@ -829,34 +817,73 @@ pub fn set_startup_count(app: AppHandle, n: usize) -> Result<(), String> {
         let n = n.min(tabs.config.tabs.len()).min(MAX_OPEN_TABS);
         tabs.config.startup_count = n;
         tabs.save()?;
-        // 让已打开的常驻标签与「配置前 n 个」一致
-        let wanted: Vec<String> = tabs
-            .config
-            .tabs
-            .iter()
-            .take(n)
-            .map(|t| t.id.clone())
-            .collect();
-        tabs.open.retain(|o| !o.pinned || wanted.contains(&o.id));
-        for id in wanted {
-            if !tabs.is_open(&id) {
-                let cfg = tabs
-                    .config
-                    .tabs
-                    .iter()
-                    .find(|t| t.id == id)
-                    .cloned()
-                    .unwrap();
+        let wanted: Vec<TabConfig> = tabs.config.tabs.iter().take(n).cloned().collect();
+        for cfg in wanted {
+            if !tabs.is_open(&cfg.id) {
+                if tabs.open.len() >= MAX_OPEN_TABS {
+                    break;
+                }
                 tabs.open.push(OpenTab {
                     id: cfg.id,
                     name: cfg.name,
                     url: cfg.url,
-                    pinned: true,
                 });
             }
         }
         if tabs.active.is_none() {
             tabs.active = tabs.open.first().map(|t| t.id.clone());
+        }
+    }
+    reconcile(&app, false);
+    emit_state(&app);
+    Ok(())
+}
+
+/// 拖拽排序后提交的新顺序。`open` 的顺序即标签栏顺序；同时把「配置里已打开的站点」
+/// 按屏幕顺序写回配置（未打开的站点保持原有相对顺序），这样"启动打开前 N 个"与所见一致。
+#[tauri::command]
+pub fn set_open_order(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    {
+        let state = app.state::<Mutex<Tabs>>();
+        let mut tabs = state.lock().unwrap();
+        let mut ordered: Vec<OpenTab> = Vec::with_capacity(tabs.open.len());
+        for id in &ids {
+            if let Some(tab) = tabs.open.iter().find(|t| &t.id == id) {
+                if !ordered.iter().any(|t| &t.id == id) {
+                    ordered.push(tab.clone());
+                }
+            }
+        }
+        for tab in &tabs.open {
+            if !ordered.iter().any(|t| &t.id == &tab.id) {
+                ordered.push(tab.clone());
+            }
+        }
+        if ordered.len() != tabs.open.len() {
+            return Err("标签顺序与当前标签不一致".into());
+        }
+        let mut reordered: Vec<TabConfig> = Vec::with_capacity(tabs.config.tabs.len());
+        for tab in &ordered {
+            if let Some(cfg) = tabs.config.tabs.iter().find(|c| c.id == tab.id) {
+                reordered.push(cfg.clone());
+            }
+        }
+        for cfg in &tabs.config.tabs {
+            if !reordered.iter().any(|c| c.id == cfg.id) {
+                reordered.push(cfg.clone());
+            }
+        }
+        let changed = reordered.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+            != tabs
+                .config
+                .tabs
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>();
+        tabs.open = ordered;
+        if changed {
+            tabs.config.tabs = reordered;
+            tabs.save()?;
         }
     }
     reconcile(&app, false);

@@ -18,9 +18,8 @@ A desktop app that wraps the web versions of popular AI assistants: one window, 
 
 - Add, rename, re-point, reorder or delete sites — the list order is the tab order
 - Open the first N tabs on launch (N = 0–9); the rest wait in the tab bar's **▾** list
-- Two kinds of tabs:
-  - **Pinned**: comes from your configuration, has no close button — remove it in Settings
-  - **Temporary**: opened from **▾** (or added without "save to config"); it has an **×** and is gone once closed
+- **Drag to reorder**: drag any tab in the tab bar (configured-but-unopened sites don't take part); the order you leave is written back to your configuration, so the next launch matches what you see
+- **Any tab can be closed with its ×**; when only one is left, the × is greyed out — at least one tab stays open
 
 ### Downloads all land in one folder
 

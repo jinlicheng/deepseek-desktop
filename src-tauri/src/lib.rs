@@ -172,6 +172,7 @@ pub fn run() {
             tabs::update_tab,
             tabs::delete_tab,
             tabs::move_tab,
+            tabs::set_open_order,
             tabs::set_startup_count,
             tabs::set_panel,
             tabs::set_download_dir,

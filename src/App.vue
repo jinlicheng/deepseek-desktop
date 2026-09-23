@@ -106,6 +106,7 @@ async function run(action) {
     @switch="(id) => run(() => invoke('switch_tab', { id }))"
     @close="(id) => run(() => invoke('close_tab', { id }))"
     @reload="() => state.active && run(() => invoke('reload_tab', { id: state.active }))"
+    @reorder="(ids) => run(() => invoke('set_open_order', { ids }))"
     @add="() => togglePanel('add')"
     @toggle-available="() => togglePanel('available')"
     @settings="() => togglePanel('settings')"

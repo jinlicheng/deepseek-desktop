@@ -119,6 +119,10 @@ button:disabled { opacity: 0.4; cursor: default; }
 .toast.show {
   transform: translate(-50%, 0);
   opacity: 1;
+}
+/* 只有按钮接收指针：提示条本体不挡标签栏上的点击与拖拽 */
+.toast.show .toast-action,
+.toast.show .toast-close {
   pointer-events: auto;
 }
 .toast-icon {
@@ -154,3 +158,13 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 15px;
 }
 .toast-close:hover { color: #fff; }
+
+/* 拖拽排序：拖动中的标签变淡，插入位置用一条竖线标出 */
+.tab {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tab.dragging { opacity: 0.55; }
+.tab.drop-before { box-shadow: inset 2px 0 0 #6ea8fe; }
+.tab.drop-after { box-shadow: inset -2px 0 0 #6ea8fe; }
+.tab .close.disabled { opacity: 0.3; cursor: default; }

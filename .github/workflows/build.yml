@@ -3,7 +3,11 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   tauri:
@@ -58,6 +62,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
+          # 只有推 tag（v*）时才发布 release；普通 main 推送仅构建 + 上传 artifacts
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('JAI {0}', github.ref_name) || '' }}
+          releaseBody: |
+            安装包未做代码签名：macOS 首次打开需右键 → 打开；Windows 会弹出 SmartScreen 提示，选「仍要运行」。
+            功能与用法见 README。
+          releaseDraft: false
+          prerelease: false
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

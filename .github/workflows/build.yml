@@ -66,17 +66,62 @@ jobs:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('JAI {0}', github.ref_name) || '' }}
           releaseBody: |
-            安装包未做代码签名：macOS 首次打开需右键 → 打开；Windows 会弹出 SmartScreen 提示，选「仍要运行」。
+            每个平台提供两份产物：**安装包**（installer）和**免安装的可运行程序**（portable）。
+            - Windows：`*-setup.exe` 安装包；`jai.exe` 双击即可运行
+            - macOS：`.dmg` 安装包；`JAI.app.zip` 解压后双击运行
+            - Linux：`.deb` / `.rpm` 安装包；`jai-linux-x86_64.tar.gz` 或 `.AppImage` 免安装运行
+            均未做代码签名：macOS 首次打开需右键 → 打开；Windows 会弹出 SmartScreen 提示，选「仍要运行」。
             功能与用法见 README。
           releaseDraft: false
           prerelease: false
 
+      # 把 bundler 之外的可运行程序挑出来，统一放进 portable/
+      - name: Package portable build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p portable
+          case "${{ matrix.platform }}" in
+            windows-latest)
+              cp src-tauri/target/release/jai.exe portable/
+              ;;
+            macos-latest)
+              # ditto 能保住 .app 里的可执行权限与符号链接，解开即用
+              ditto -c -k --sequesterRsrc --keepParent \
+                src-tauri/target/universal-apple-darwin/release/bundle/macos/JAI.app \
+                portable/JAI.app.zip
+              ;;
+            ubuntu-latest)
+              # 打成 tar.gz 是为了保住可执行位：artifacts 的 zip 会丢掉权限
+              tar -czf portable/jai-linux-x86_64.tar.gz -C src-tauri/target/release jai
+              cp src-tauri/target/release/bundle/appimage/*.AppImage portable/
+              ;;
+          esac
+          ls -lh portable
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: jai-${{ matrix.platform }}
+          name: jai-installer-${{ matrix.platform }}
           path: |
             src-tauri/target/**/bundle/nsis/*-setup.exe
+            src-tauri/target/**/bundle/msi/*.msi
             src-tauri/target/**/bundle/dmg/*.dmg
             src-tauri/target/**/bundle/deb/*.deb
+            src-tauri/target/**/bundle/rpm/*.rpm
           if-no-files-found: error
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: jai-portable-${{ matrix.platform }}
+          path: portable/*
+          if-no-files-found: error
+
+      # tauri-action 只把 bundler 产物挂上 release，portable/ 要自己补
+      - name: Attach portable build to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" portable/* --clobber

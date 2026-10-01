@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# CI 打包免安装产物时的中转目录
+/portable
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

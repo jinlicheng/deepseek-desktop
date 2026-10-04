@@ -68,7 +68,7 @@ pub(crate) fn content_bounds(
 
 thread_local! {
     /// 同一线程是否正处在 `apply_bounds` 内部：重入探测用，见下面第 2 条说明
-    static APPLYING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static APPLYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 几何的唯一入口：计算当前应有的内容区几何，记录到 last_applied 并应用到所有已存在的

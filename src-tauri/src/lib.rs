@@ -66,11 +66,38 @@ pub(crate) fn content_bounds(
     ))
 }
 
+thread_local! {
+    /// 同一线程是否正处在 `apply_bounds` 内部：重入探测用，见下面第 2 条说明
+    static APPLYING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
 /// 几何的唯一入口：计算当前应有的内容区几何，记录到 last_applied 并应用到所有已存在的
 /// 子 webview。返回该几何，供 reconcile 创建新 webview 时使用。
+///
+/// 有两处是为了避开 Windows 上的重入自锁，改回去会复现「加标签页后整个窗口僵死」：
+/// 1. **不持锁**调用 `set_position` / `set_size`。Windows 上这些调用可能进消息泵，
+///    泵里派发出的窗口消息（如 Resized）会重入到本函数；早先这里是持着 `Tabs` 锁调用的，
+///    同一线程再抢同一把非可重入锁就是自锁，UI 线程从此不回来。
+/// 2. 重入时**只算几何、不重复应用**。调用方（reconcile）要的是返回值，照给不误；
+///    应用几何这件事外层正在做，重入这层再做一遍只会多绕一圈。
 pub(crate) fn apply_bounds(app: &AppHandle) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            APPLYING.with(|applying| applying.set(false));
+        }
+    }
+
+    let nested = APPLYING.with(|applying| applying.replace(true));
+    let _reset = Reset;
+
     let win = app.get_window(WIN_LABEL)?;
     let bounds = content_bounds(app, &win).ok()?;
+    if nested {
+        crate::debug_log("[bounds] 重入：只算几何，不再应用");
+        return Some(bounds);
+    }
+
     let changed = {
         let geometry = app.state::<TabGeometry>();
         let mut last = geometry.last_applied.lock().unwrap();
@@ -79,14 +106,27 @@ pub(crate) fn apply_bounds(app: &AppHandle) -> Option<(LogicalPosition<f64>, Log
         changed
     };
     if changed {
-        if let Some(tabs) = app.try_state::<Mutex<Tabs>>() {
-            for t in &tabs.lock().unwrap().open {
-                if let Some(wv) = app.get_webview(&tabs::label_of(&t.id)) {
-                    let _ = wv.set_position(bounds.0);
-                    let _ = wv.set_size(bounds.1);
-                }
+        // 先把标签名取完再放锁：调用 webview 的时候手里不拿任何锁
+        let labels: Vec<String> = match app.try_state::<Mutex<Tabs>>() {
+            Some(tabs) => tabs
+                .lock()
+                .unwrap()
+                .open
+                .iter()
+                .map(|t| tabs::label_of(&t.id))
+                .collect(),
+            None => Vec::new(),
+        };
+        for label in labels {
+            if let Some(wv) = app.get_webview(&label) {
+                let _ = wv.set_position(bounds.0);
+                let _ = wv.set_size(bounds.1);
             }
         }
+        crate::debug_log(&format!(
+            "[bounds] 应用 pos=({}, {}) size=({}, {})",
+            bounds.0.x, bounds.0.y, bounds.1.width, bounds.1.height
+        ));
     }
     Some(bounds)
 }
@@ -136,8 +176,11 @@ fn reveal_last_download(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 下载链路的诊断日志：默认不写（`JAI_DL_LOG=1` 启动时才写 /tmp/jai_dl.log）。
-/// 某些站点（如 Kimi）的下载触发方式很隐蔽，排查时靠它看走了哪条路。
+/// 诊断日志：默认不写（`JAI_DL_LOG=1` 启动时才写 `<系统临时目录>/jai_dl.log`）。
+///
+/// 下载的触发方式、以及 Windows 上创建 webview 卡在哪一步，都只能靠它定位。
+/// 所以路径必须走 `temp_dir()` 而不能写死 `/tmp`：后者在 Windows 上会被解析成
+/// 「当前盘符根目录下的 \tmp」，目录不存在就静默什么都不写——正是最需要日志的那台机器上没日志。
 pub(crate) fn debug_log(line: &str) {
     use std::io::Write as _;
     use std::sync::OnceLock;
@@ -148,7 +191,7 @@ pub(crate) fn debug_log(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/jai_dl.log")
+        .open(std::env::temp_dir().join("jai_dl.log"))
     {
         let _ = writeln!(f, "{line}");
     }
@@ -194,6 +237,9 @@ pub fn run() {
         })
         .setup(|app| {
             app.manage(TabGeometry::default());
+
+            // 每次启动插一条分隔线，便于分辨日志文件里哪一段属于哪次运行
+            crate::debug_log(&format!("===== 启动 pid={} =====", std::process::id()));
 
             let config_path = app.path().app_config_dir()?.join("tabs.json");
             app.manage(Mutex::new(Tabs::load(config_path)));

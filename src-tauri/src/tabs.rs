@@ -139,8 +139,10 @@ pub fn snapshot(app: &AppHandle) -> TabsSnapshot {
 }
 
 pub fn emit_state(app: &AppHandle) {
+    crate::debug_log("[state] emit 开始");
     let _ = app.emit("state-changed", snapshot(app));
     rebuild_tab_menu(app);
+    crate::debug_log("[state] emit 结束");
 }
 
 /// 让「标签」菜单与当前打开的标签一致（名称 + Cmd/Ctrl+1~9 快捷键）
@@ -148,6 +150,7 @@ fn rebuild_tab_menu(app: &AppHandle) {
     let handle = app.clone();
     let app = app.clone();
     let _ = handle.run_on_main_thread(move || {
+        crate::debug_log("[menu] 重建开始");
         let Some(tab_menu) = app.try_state::<TabMenu>() else {
             return;
         };
@@ -175,15 +178,21 @@ fn rebuild_tab_menu(app: &AppHandle) {
             };
             let _ = tab_menu.append(&item);
         }
+        crate::debug_log("[menu] 重建结束");
     });
 }
 
 /// 让 webview 与 open/active 列表一致：销毁多余的、创建缺失的、调整几何与显隐。
-/// Windows 上创建 webview 不能在命令或事件处理器里进行（会死锁），统一投递到主线程。
+/// 统一投递到主线程再动 webview：Windows 上 WebView2 控制器的创建走 `wait_with_pump`，
+/// 会在这期间派发窗口消息（嵌套消息泵），不在主线程上做这些事更容易踩到重入。
+///
+/// 里面的分步日志是定位「Windows 加标签页后僵死」用的：僵死时拿不到栈，
+/// 只能靠最后一行日志判断卡在哪一步。问题定位完可以删掉这些埋点。
 pub fn reconcile(app: &AppHandle, focus_active: bool) {
     let handle = app.clone();
     let app = app.clone();
     let _ = handle.run_on_main_thread(move || {
+        crate::debug_log("[reconcile] 开始");
         let (open, active, recreate) = {
             let state = app.state::<Mutex<Tabs>>();
             let mut tabs = state.lock().unwrap();
@@ -194,13 +203,16 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
             )
         };
         let Some(win) = app.get_window(WIN_LABEL) else {
+            crate::debug_log("[reconcile] 拿不到窗口，放弃");
             return;
         };
         // 几何统一走 apply_bounds（它会记录 last_applied 并应用到已存在的 webview），
         // 这里拿它的返回值创建缺失的 webview
         let Some((position, size)) = crate::apply_bounds(&app) else {
+            crate::debug_log("[reconcile] 拿不到几何，放弃");
             return;
         };
+        crate::debug_log(&format!("[reconcile] 待处理标签 {} 个", open.len()));
 
         // 1. 销毁：回收站标签 + 待重建列表
         let keep: Vec<String> = open.iter().map(|t| label_of(&t.id)).collect();
@@ -218,12 +230,18 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
                 Some(wv) => Some(wv),
                 None => {
                     let Ok(url) = t.url.parse() else { continue };
+                    crate::debug_log(&format!("[reconcile] 创建 {label} -> {url}"));
                     let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(url))
                         .initialization_script_for_all_frames(crate::download::injected_script())
                         .on_new_window(new_window_handler(app.clone()))
                         .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
                         .on_download(crate::download::handler(app.clone()));
-                    win.add_child(builder, position, size).ok()
+                    let created = win.add_child(builder, position, size).ok();
+                    crate::debug_log(&format!(
+                        "[reconcile] {label} 创建返回 ok={}",
+                        created.is_some()
+                    ));
+                    created
                 }
             };
             if let Some(wv) = wv {
@@ -231,6 +249,7 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
                 let _ = wv.set_size(size);
                 if is_active {
                     let _ = wv.show();
+                    crate::debug_log(&format!("[reconcile] {label} 已显示"));
                     if focus_active {
                         let _ = wv.set_focus();
                     }
@@ -239,6 +258,7 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
                 }
             }
         }
+        crate::debug_log("[reconcile] 结束");
     });
 }
 

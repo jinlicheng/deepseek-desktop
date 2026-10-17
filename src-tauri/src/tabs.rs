@@ -222,46 +222,51 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
             }
         }
 
-        // 2. 创建缺失的，并统一几何与显隐
+        // 2. 先把缺失的 webview 建齐：创建必须放在任何 show/hide 之前。
+        //    Windows 上「先隐藏已有 webview 再 add_child」会卡死在 WebView2 控制器创建里
+        //    （实测日志停在「创建 ... 」之后没有返回），启动时没有隐藏动作所以一直正常。
         for t in &open {
             let label = label_of(&t.id);
-            let is_active = active.as_deref() == Some(t.id.as_str());
-            let wv = match app.get_webview(&label) {
-                Some(wv) => Some(wv),
-                None => {
-                    let Ok(url) = t.url.parse() else { continue };
-                    crate::debug_log(&format!("[reconcile] 创建 {label} -> {url}"));
-                    let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(url))
-                        .initialization_script_for_all_frames(crate::download::injected_script())
-                        .on_new_window(new_window_handler(app.clone()))
-                        .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
-                        .on_download(crate::download::handler(app.clone()));
-                    let created = win.add_child(builder, position, size).ok();
-                    crate::debug_log(&format!(
-                        "[reconcile] {label} 创建返回 ok={}",
-                        created.is_some()
-                    ));
-                    created
-                }
-            };
-            if let Some(wv) = wv {
-                let _ = wv.set_position(position);
-                let _ = wv.set_size(size);
-                if is_active {
-                    let _ = wv.show();
-                    crate::debug_log(&format!("[reconcile] {label} 已显示"));
-                    if focus_active {
-                        let _ = wv.set_focus();
-                    }
-                } else {
-                    let _ = wv.hide();
-                }
-                crate::debug_log(&format!(
-                    "[reconcile] {label} 实测 pos={:?} size={:?}",
-                    wv.position(),
-                    wv.size()
-                ));
+            if app.get_webview(&label).is_some() {
+                continue;
             }
+            let Ok(url) = t.url.parse() else { continue };
+            crate::debug_log(&format!("[reconcile] 创建 {label} -> {url}"));
+            let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(url))
+                .initialization_script_for_all_frames(crate::download::injected_script())
+                .on_new_window(new_window_handler(app.clone()))
+                .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
+                .on_download(crate::download::handler(app.clone()));
+            let created = win.add_child(builder, position, size).ok();
+            crate::debug_log(&format!(
+                "[reconcile] {label} 创建返回 ok={}",
+                created.is_some()
+            ));
+        }
+
+        // 3. 几何与显隐
+        for t in &open {
+            let label = label_of(&t.id);
+            let Some(wv) = app.get_webview(&label) else {
+                continue;
+            };
+            let is_active = active.as_deref() == Some(t.id.as_str());
+            let _ = wv.set_position(position);
+            let _ = wv.set_size(size);
+            if is_active {
+                let _ = wv.show();
+                crate::debug_log(&format!("[reconcile] {label} 已显示"));
+                if focus_active {
+                    let _ = wv.set_focus();
+                }
+            } else {
+                let _ = wv.hide();
+            }
+            crate::debug_log(&format!(
+                "[reconcile] {label} 实测 pos={:?} size={:?}",
+                wv.position(),
+                wv.size()
+            ));
         }
         crate::debug_log("[reconcile] 结束");
     });

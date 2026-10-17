@@ -117,7 +117,7 @@ pub(crate) fn apply_bounds(app: &AppHandle) -> Option<(LogicalPosition<f64>, Log
                 .unwrap()
                 .open
                 .iter()
-                .map(|t| tabs::label_of(&t.id))
+                .map(|t| tabs::label_of(t.slot))
                 .collect(),
             None => Vec::new(),
         };
@@ -263,6 +263,8 @@ pub fn run() {
             if tray::enabled() {
                 tray::setup(app.handle())?;
             }
+            // 必须在事件循环起来之前把子 webview 都建好（Windows 上运行时创建会卡死）
+            tabs::create_pool(app.handle());
             tabs::reconcile(app.handle(), false);
             tabs::emit_state(app.handle());
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -22,6 +22,10 @@ pub struct OpenTab {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// 承载它的 webview 槽位。webview 只在启动时预创建（Windows 上事件循环运行期间
+    /// 创建子 webview 会卡死在 WebView2 控制器创建里），标签只是占用其中一个槽位。
+    #[serde(skip)]
+    pub slot: usize,
 }
 
 /// 标签页集合 + 应用配置（被 manage 进应用状态）
@@ -30,8 +34,9 @@ pub struct Tabs {
     pub config_path: PathBuf,
     pub open: Vec<OpenTab>,
     pub active: Option<String>,
-    /// 需要先销毁再创建的 webview 标签（如修改网址后）
-    recreate: Vec<String>,
+    /// 每个槽位最近一次导航到的地址。**不能用 `webview.url()` 判断**：wry 在 about:blank
+    /// 的 webview 上取 URL 会 panic（项目里修过一次的崩溃），所以这里自己记账。
+    navigated: HashMap<usize, String>,
 }
 
 /// 标签栏右侧停靠面板的种类
@@ -64,8 +69,9 @@ impl Panel {
 /// 「标签」菜单（含 Cmd/Ctrl+1~9 快捷键），启动时创建，随后按需重建
 pub struct TabMenu(pub Submenu<Wry>);
 
-pub fn label_of(tab_id: &str) -> String {
-    format!("tab_{tab_id}")
+/// 槽位对应的子 webview 标签
+pub fn label_of(slot: usize) -> String {
+    format!("tab_slot_{slot}")
 }
 
 impl Tabs {
@@ -74,11 +80,13 @@ impl Tabs {
         let open: Vec<OpenTab> = config
             .tabs
             .iter()
-            .take(config.startup_count)
-            .map(|t| OpenTab {
+            .take(config.startup_count.min(MAX_OPEN_TABS))
+            .enumerate()
+            .map(|(slot, t)| OpenTab {
                 id: t.id.clone(),
                 name: t.name.clone(),
                 url: t.url.clone(),
+                slot,
             })
             .collect();
         let active = open.first().map(|t| t.id.clone());
@@ -87,8 +95,13 @@ impl Tabs {
             config_path,
             open,
             active,
-            recreate: Vec::new(),
+            navigated: HashMap::new(),
         }
+    }
+
+    /// 找一个空闲的 webview 槽位（None 表示已达同时打开上限）
+    fn free_slot(&self) -> Option<usize> {
+        (0..MAX_OPEN_TABS).find(|s| !self.open.iter().any(|t| t.slot == *s))
     }
 
     fn save(&self) -> Result<(), String> {
@@ -182,94 +195,116 @@ fn rebuild_tab_menu(app: &AppHandle) {
     });
 }
 
-/// 让 webview 与 open/active 列表一致：销毁多余的、创建缺失的、调整几何与显隐。
-/// 统一投递到主线程再动 webview：Windows 上 WebView2 控制器的创建走 `wait_with_pump`，
-/// 会在这期间派发窗口消息（嵌套消息泵），不在主线程上做这些事更容易踩到重入。
+/// 让 webview 与 open/active 列表一致：未占用的槽位清空隐藏，打开的标签导航并调整几何与显隐。
 ///
-/// 里面的分步日志是定位「Windows 加标签页后僵死」用的：僵死时拿不到栈，
-/// 只能靠最后一行日志判断卡在哪一步。问题定位完可以删掉这些埋点。
+/// **这里不再创建 webview**：Windows 上事件循环运行期间调用 `Window::add_child` 会卡死在
+/// WebView2 控制器创建里（实测日志停在「创建 ...」之后没有返回，上游 #10010 同样未修）。
+/// 所有子 webview 由 [`create_pool`] 在启动时预建好，运行时只做导航 / 显隐。
 pub fn reconcile(app: &AppHandle, focus_active: bool) {
     let handle = app.clone();
     let app = app.clone();
     let _ = handle.run_on_main_thread(move || {
         crate::debug_log("[reconcile] 开始");
-        let (open, active, recreate) = {
+        let (open, active, mut navigated) = {
             let state = app.state::<Mutex<Tabs>>();
-            let mut tabs = state.lock().unwrap();
+            let tabs = state.lock().unwrap();
             (
                 tabs.open.clone(),
                 tabs.active.clone(),
-                std::mem::take(&mut tabs.recreate),
+                tabs.navigated.clone(),
             )
         };
-        let Some(win) = app.get_window(WIN_LABEL) else {
+        let Some(_win) = app.get_window(WIN_LABEL) else {
             crate::debug_log("[reconcile] 拿不到窗口，放弃");
             return;
         };
-        // 几何统一走 apply_bounds（它会记录 last_applied 并应用到已存在的 webview），
-        // 这里拿它的返回值创建缺失的 webview
         let Some((position, size)) = crate::apply_bounds(&app) else {
             crate::debug_log("[reconcile] 拿不到几何，放弃");
             return;
         };
         crate::debug_log(&format!("[reconcile] 待处理标签 {} 个", open.len()));
 
-        // 1. 销毁：回收站标签 + 待重建列表
-        let keep: Vec<String> = open.iter().map(|t| label_of(&t.id)).collect();
-        for (label, wv) in app.webviews() {
-            if label.starts_with("tab_") && (recreate.contains(&label) || !keep.contains(&label)) {
-                let _ = wv.close();
-            }
-        }
-
-        // 2. 先把缺失的 webview 建齐：创建必须放在任何 show/hide 之前。
-        //    Windows 上「先隐藏已有 webview 再 add_child」会卡死在 WebView2 控制器创建里
-        //    （实测日志停在「创建 ... 」之后没有返回），启动时没有隐藏动作所以一直正常。
-        for t in &open {
-            let label = label_of(&t.id);
-            if app.get_webview(&label).is_some() {
+        // 1. 没有被占用的槽位：隐藏并送回 about:blank，别让关掉的站点在后台继续跑
+        for slot in 0..MAX_OPEN_TABS {
+            if open.iter().any(|t| t.slot == slot) {
                 continue;
             }
-            let Ok(url) = t.url.parse() else { continue };
-            crate::debug_log(&format!("[reconcile] 创建 {label} -> {url}"));
-            let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(url))
-                .initialization_script_for_all_frames(crate::download::injected_script())
-                .on_new_window(new_window_handler(app.clone()))
-                .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
-                .on_download(crate::download::handler(app.clone()));
-            let created = win.add_child(builder, position, size).ok();
-            crate::debug_log(&format!(
-                "[reconcile] {label} 创建返回 ok={}",
-                created.is_some()
-            ));
-        }
-
-        // 3. 几何与显隐
-        for t in &open {
-            let label = label_of(&t.id);
-            let Some(wv) = app.get_webview(&label) else {
+            let Some(wv) = app.get_webview(&label_of(slot)) else {
                 continue;
             };
+            let _ = wv.hide();
+            if navigated.remove(&slot).is_some() {
+                let _ = wv.navigate(blank_url());
+            }
+        }
+
+        // 2. 打开的标签：地址变过的槽位先导航，再统一几何与显隐
+        for t in &open {
+            let Some(wv) = app.get_webview(&label_of(t.slot)) else {
+                crate::debug_log(&format!("[reconcile] 槽位 {} 缺失", t.slot));
+                continue;
+            };
+            if navigated.get(&t.slot) != Some(&t.url) {
+                if let Ok(url) = t.url.parse() {
+                    crate::debug_log(&format!("[reconcile] 槽位 {} -> {url}", t.slot));
+                    let _ = wv.navigate(url);
+                    navigated.insert(t.slot, t.url.clone());
+                }
+            }
             let is_active = active.as_deref() == Some(t.id.as_str());
             let _ = wv.set_position(position);
             let _ = wv.set_size(size);
             if is_active {
                 let _ = wv.show();
-                crate::debug_log(&format!("[reconcile] {label} 已显示"));
+                crate::debug_log(&format!("[reconcile] 槽位 {} 显示", t.slot));
                 if focus_active {
                     let _ = wv.set_focus();
                 }
             } else {
                 let _ = wv.hide();
             }
-            crate::debug_log(&format!(
-                "[reconcile] {label} 实测 pos={:?} size={:?}",
-                wv.position(),
-                wv.size()
-            ));
+        }
+
+        if let Some(tabs) = app.try_state::<Mutex<Tabs>>() {
+            tabs.lock().unwrap().navigated = navigated;
         }
         crate::debug_log("[reconcile] 结束");
     });
+}
+
+fn blank_url() -> Url {
+    Url::parse("about:blank").expect("about:blank 一定是合法 URL")
+}
+
+/// 启动时把所有子 webview 预建好（数量 = 同时打开上限）。
+///
+/// **只能在启动阶段调用**：Windows 上事件循环开始后再 `Window::add_child` 会卡死，
+/// 所以运行时的新标签只能占用这里建好的槽位。
+pub fn create_pool(app: &AppHandle) {
+    let Some(win) = app.get_window(WIN_LABEL) else {
+        return;
+    };
+    let Some((position, size)) = crate::apply_bounds(app) else {
+        return;
+    };
+    for slot in 0..MAX_OPEN_TABS {
+        let label = label_of(slot);
+        if app.get_webview(&label).is_some() {
+            continue;
+        }
+        let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(blank_url()))
+            .initialization_script_for_all_frames(crate::download::injected_script())
+            .on_new_window(new_window_handler(app.clone()))
+            .on_navigation(tab_navigation_handler(app.clone(), label.clone()))
+            .on_download(crate::download::handler(app.clone()));
+        match win.add_child(builder, position, size) {
+            Ok(wv) => {
+                let _ = wv.hide();
+                crate::debug_log(&format!("[pool] 槽位 {slot} 就绪"));
+            }
+            Err(e) => crate::debug_log(&format!("[pool] 槽位 {slot} 创建失败: {e}")),
+        }
+    }
 }
 
 /// 页面侧快捷键回传：Ctrl/Cmd + n 切到第 n 个已打开的标签
@@ -378,9 +413,9 @@ fn new_window_handler(
                         .map(|d| host == d || host.ends_with(&format!(".{d}")))
                         .unwrap_or(false)
                 })
-                .map(|t| t.id.clone())
+                .map(|t| t.slot)
         };
-        match target.and_then(|id| app.get_webview(&label_of(&id))) {
+        match target.and_then(|slot| app.get_webview(&label_of(slot))) {
             // 站内地址：留在标签页里打开
             Some(wv) => {
                 crate::debug_log(&format!("[new-window] {url} -> 站内标签 {}", wv.label()));
@@ -661,7 +696,12 @@ pub fn switch_tab(app: AppHandle, id: String) {
 /// 刷新指定标签页（webview 页面进程被系统回收后的兜底手段）
 #[tauri::command]
 pub fn reload_tab(app: AppHandle, id: String) {
-    if let Some(wv) = app.get_webview(&label_of(&id)) {
+    let slot = {
+        let state = app.state::<Mutex<Tabs>>();
+        let tabs = state.lock().unwrap();
+        tabs.open.iter().find(|t| t.id == id).map(|t| t.slot)
+    };
+    if let Some(wv) = slot.and_then(|slot| app.get_webview(&label_of(slot))) {
         let _ = wv.reload();
     }
 }
@@ -679,15 +719,16 @@ pub fn open_available(app: AppHandle, id: String) -> Result<(), String> {
                 .find(|t| t.id == id)
                 .cloned()
                 .ok_or("配置中不存在该站点")?;
-            if tabs.open.len() >= MAX_OPEN_TABS {
+            let Some(slot) = tabs.free_slot() else {
                 return Err(format!(
                     "同时打开的标签页已达上限（{MAX_OPEN_TABS} 个），请先关闭一些"
                 ));
-            }
+            };
             tabs.open.push(OpenTab {
                 id: cfg.id,
                 name: cfg.name,
                 url: cfg.url,
+                slot,
             });
         }
         tabs.active = Some(id);
@@ -735,11 +776,11 @@ pub fn add_tab(app: AppHandle, name: String, url: String, save: bool) -> Result<
             tabs.active = Some(existing.id.clone());
             false
         } else {
-            if tabs.open.len() >= MAX_OPEN_TABS {
+            let Some(slot) = tabs.free_slot() else {
                 return Err(format!(
                     "同时打开的标签页已达上限（{MAX_OPEN_TABS} 个），请先关闭一些"
                 ));
-            }
+            };
             if save {
                 tabs.config.tabs.push(TabConfig {
                     id: new_id.clone(),
@@ -752,6 +793,7 @@ pub fn add_tab(app: AppHandle, name: String, url: String, save: bool) -> Result<
                 id: new_id.clone(),
                 name,
                 url,
+                slot,
             });
             tabs.active = Some(new_id.clone());
             true
@@ -773,7 +815,7 @@ pub fn update_tab(
     url: Option<String>,
 ) -> Result<(), String> {
     let url = url.map(|u| normalize_url(&u)).transpose()?;
-    let recreate = {
+    let navigate = {
         let state = app.state::<Mutex<Tabs>>();
         let mut tabs = state.lock().unwrap();
         let (new_name, new_url, url_changed) = {
@@ -794,18 +836,25 @@ pub fn update_tab(
             )
         };
         tabs.save()?;
-        let mut recreate = false;
+        let mut navigate = None;
         if let Some(open) = tabs.open.iter_mut().find(|o| o.id == id) {
             open.name = new_name;
-            open.url = new_url;
-            recreate = url_changed;
+            open.url = new_url.clone();
+            if url_changed {
+                navigate = Some((open.slot, new_url));
+            }
         }
-        recreate
+        // 记账，避免 reconcile 看到「地址不一致」又导航一次
+        if let Some((slot, url)) = &navigate {
+            tabs.navigated.insert(*slot, url.clone());
+        }
+        navigate
     };
-    if recreate {
-        let state = app.state::<Mutex<Tabs>>();
-        let mut tabs = state.lock().unwrap();
-        tabs.recreate.push(label_of(&id));
+    // 改网址不重建 webview（Windows 上运行时建 webview 会卡死），直接导航到新地址
+    if let Some((slot, url)) = navigate {
+        if let (Some(wv), Ok(url)) = (app.get_webview(&label_of(slot)), url.parse()) {
+            let _ = wv.navigate(url);
+        }
     }
     reconcile(&app, false);
     emit_state(&app);
@@ -872,13 +921,14 @@ pub fn set_startup_count(app: AppHandle, n: usize) -> Result<(), String> {
         let wanted: Vec<TabConfig> = tabs.config.tabs.iter().take(n).cloned().collect();
         for cfg in wanted {
             if !tabs.is_open(&cfg.id) {
-                if tabs.open.len() >= MAX_OPEN_TABS {
+                let Some(slot) = tabs.free_slot() else {
                     break;
-                }
+                };
                 tabs.open.push(OpenTab {
                     id: cfg.id,
                     name: cfg.name,
                     url: cfg.url,
+                    slot,
                 });
             }
         }

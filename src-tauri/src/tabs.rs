@@ -256,6 +256,11 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
                 } else {
                     let _ = wv.hide();
                 }
+                crate::debug_log(&format!(
+                    "[reconcile] {label} 实测 pos={:?} size={:?}",
+                    wv.position(),
+                    wv.size()
+                ));
             }
         }
         crate::debug_log("[reconcile] 结束");
@@ -639,6 +644,7 @@ pub fn switch_to(app: &AppHandle, id: &str) {
 
 #[tauri::command]
 pub fn get_state(app: AppHandle) -> TabsSnapshot {
+    crate::debug_log("[ipc] get_state");
     snapshot(&app)
 }
 

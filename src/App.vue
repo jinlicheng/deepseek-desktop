@@ -44,6 +44,17 @@ function reportViewport() {
 }
 
 function onKeydown(e) {
+  // Ctrl/Cmd+1~9 切换标签。子 webview 里有一份同样的逻辑（注入脚本），这里补的是
+  // 焦点在主页面（标签栏 / 右侧面板）时的情况。
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && state.value) {
+    const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code || "") || /^([1-9])$/.exec(e.key || "");
+    const tab = m && state.value.open[Number(m[1]) - 1];
+    if (tab) {
+      e.preventDefault();
+      run(() => invoke("switch_tab", { id: tab.id }));
+      return;
+    }
+  }
   // Esc 关闭面板（输入框聚焦时不触发）
   if (e.key === "Escape" && !["INPUT", "TEXTAREA"].includes(e.target.tagName)) {
     run(() => invoke("set_panel", { panel: null }));

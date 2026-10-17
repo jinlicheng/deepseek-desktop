@@ -143,6 +143,18 @@ fn setup_menu_bar(app: &tauri::App) -> tauri::Result<()> {
         }
     }
     app.manage(TabMenu(tabs_menu));
+
+    // Windows 上原生菜单栏会在 tab 栏上方多出一条浅色横条，和深色界面不搭，
+    // 而且 Win32 菜单栏不跟随深色模式。这里把它从窗口上摘掉：
+    // hide_menu 内部就是 SetMenu(NULL)，窗口子类和菜单的 accelerator table 都保留，
+    // 所以 Ctrl+1~9 仍由 tauri 的消息钩子翻译，功能一点不丢。
+    #[cfg(windows)]
+    {
+        if let Some(win) = app.get_window(WIN_LABEL) {
+            let _ = win.hide_menu();
+        }
+    }
+
     Ok(())
 }
 

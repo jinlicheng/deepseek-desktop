@@ -262,6 +262,18 @@ pub fn reconcile(app: &AppHandle, focus_active: bool) {
     });
 }
 
+/// 页面侧快捷键回传：Ctrl/Cmd + n 切到第 n 个已打开的标签
+fn switch_to_index(app: &AppHandle, n: usize) {
+    let id = {
+        let state = app.state::<Mutex<Tabs>>();
+        let tabs = state.lock().unwrap();
+        tabs.open.get(n.saturating_sub(1)).map(|t| t.id.clone())
+    };
+    if let Some(id) = id {
+        switch_to(app, &id);
+    }
+}
+
 /// 标签页内的导航拦截：
 /// 站点触发下载还有另外两种方式——隐藏 iframe 的 `src`、或直接跳转过去（不带 target）。
 /// 这两种都会走「导航」，而 wry 只在 MIME 无法显示时才判成下载，所以 `image/png`
@@ -285,6 +297,15 @@ fn tab_navigation_handler(
                     crate::debug_log(&format!("[page-download] {target}"));
                     download_external(&app, target);
                 }
+            } else if let Some(n) = path
+                .strip_prefix("tab-")
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                // 不在导航回调里直接切：切换要走 reconcile，必要时还要建 webview，
+                // 投到独立线程让它走正常的「主线程任务」路径。
+                crate::debug_log(&format!("[shortcut] Ctrl+{n}"));
+                let app = app.clone();
+                std::thread::spawn(move || switch_to_index(&app, n));
             }
             return false;
         }

@@ -81,15 +81,19 @@ thread_local! {
 /// 2. 重入时**只算几何、不重复应用**。调用方（reconcile）要的是返回值，照给不误；
 ///    应用几何这件事外层正在做，重入这层再做一遍只会多绕一圈。
 pub(crate) fn apply_bounds(app: &AppHandle) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
-    struct Reset;
+    // 只有真正把标志位从 false 翻成 true 的那一层，才有资格在退出时清掉它。
+    // 重入那层如果也清，外层还在跑就会被误判成「不在 apply_bounds 内」。
+    struct Reset(bool);
     impl Drop for Reset {
         fn drop(&mut self) {
-            APPLYING.with(|applying| applying.set(false));
+            if !self.0 {
+                APPLYING.with(|applying| applying.set(false));
+            }
         }
     }
 
     let nested = APPLYING.with(|applying| applying.replace(true));
-    let _reset = Reset;
+    let _reset = Reset(nested);
 
     let win = app.get_window(WIN_LABEL)?;
     let bounds = content_bounds(app, &win).ok()?;
@@ -188,7 +192,8 @@ fn reveal_last_download(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 诊断日志：默认不写（`JAI_DL_LOG=1` 启动时才写 `<系统临时目录>/jai_dl.log`）。
+/// 诊断日志：debug 构建始终写；release 构建设 `JAI_DL_LOG=1` 才写。
+/// 统一写到 `<系统临时目录>/jai_dl.log`。
 ///
 /// 下载的触发方式、以及 Windows 上创建 webview 卡在哪一步，都只能靠它定位。
 /// 所以路径必须走 `temp_dir()` 而不能写死 `/tmp`：后者在 Windows 上会被解析成
@@ -197,7 +202,7 @@ pub(crate) fn debug_log(line: &str) {
     use std::io::Write as _;
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    if !*ENABLED.get_or_init(|| std::env::var("JAI_DL_LOG").is_ok()) {
+    if !*ENABLED.get_or_init(|| cfg!(debug_assertions) || std::env::var("JAI_DL_LOG").is_ok()) {
         return;
     }
     if let Ok(mut f) = std::fs::OpenOptions::new()

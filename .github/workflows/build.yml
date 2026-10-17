@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      profile:
+        description: '构建类型：debug 带调试信息与控制台，并默认开启诊断日志'
+        type: choice
+        options: [release, debug]
+        default: release
 
 permissions:
   contents: write
@@ -61,10 +67,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: ${{ matrix.args }}
-          # 只有推 tag（v*）时才发布 release；普通 main 推送仅构建 + 上传 artifacts
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('JAI {0}', github.ref_name) || '' }}
+          args: ${{ matrix.args }} ${{ inputs.profile == 'debug' && '--debug' || '' }}
+          # 只有推 tag（v*）时才发布 release；debug 构建永远不发布
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && inputs.profile != 'debug' && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && inputs.profile != 'debug' && format('JAI {0}', github.ref_name) || '' }}
           releaseBody: |
             每个平台提供两份产物：**安装包**（installer）和**免安装的可运行程序**（portable）。
             - Windows：`*-setup.exe` 安装包；`jai.exe` 双击即可运行
@@ -80,21 +86,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # debug 构建的产物在 target/debug，release 在 target/release
+          profile=release
+          if [ "${{ inputs.profile }}" = "debug" ]; then profile=debug; fi
           mkdir -p portable
           case "${{ matrix.platform }}" in
             windows-latest)
-              cp src-tauri/target/release/jai.exe portable/
+              cp "src-tauri/target/$profile/jai.exe" portable/
+              # debug 构建带 PDB，抓栈时要用
+              if [ -f "src-tauri/target/$profile/jai.pdb" ]; then
+                cp "src-tauri/target/$profile/jai.pdb" portable/
+              fi
               ;;
             macos-latest)
               # ditto 能保住 .app 里的可执行权限与符号链接，解开即用
               ditto -c -k --sequesterRsrc --keepParent \
-                src-tauri/target/universal-apple-darwin/release/bundle/macos/JAI.app \
+                "src-tauri/target/universal-apple-darwin/$profile/bundle/macos/JAI.app" \
                 portable/JAI.app.zip
               ;;
             ubuntu-latest)
               # 打成 tar.gz 是为了保住可执行位：artifacts 的 zip 会丢掉权限
-              tar -czf portable/jai-linux-x86_64.tar.gz -C src-tauri/target/release jai
-              cp src-tauri/target/release/bundle/appimage/*.AppImage portable/
+              tar -czf portable/jai-linux-x86_64.tar.gz -C "src-tauri/target/$profile" jai
+              cp "src-tauri/target/$profile/bundle/appimage/"*.AppImage portable/
               ;;
           esac
           ls -lh portable
@@ -102,7 +115,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: jai-installer-${{ matrix.platform }}
+          name: jai-installer-${{ matrix.platform }}${{ inputs.profile == 'debug' && '-debug' || '' }}
           path: |
             src-tauri/target/**/bundle/nsis/*-setup.exe
             src-tauri/target/**/bundle/msi/*.msi
@@ -114,13 +127,13 @@ jobs:
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
-          name: jai-portable-${{ matrix.platform }}
+          name: jai-portable-${{ matrix.platform }}${{ inputs.profile == 'debug' && '-debug' || '' }}
           path: portable/*
           if-no-files-found: error
 
       # tauri-action 只把 bundler 产物挂上 release，portable/ 要自己补
       - name: Attach portable build to release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && inputs.profile != 'debug'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -308,6 +308,20 @@ pub const INJECTED_JS: &str = r#"(() => {
         });
       }
     });
+    patch(() => {
+      // 快捷键：Windows 上原生菜单的 accelerator 收不到键盘消息（键盘消息的 hwnd 是
+      // 获得焦点的子 webview，WM_COMMAND 因此到不了主窗口），只能在页面里接管。
+      // 用哨兵地址回传，导航会被 tab_navigation_handler 取消，不会真的发请求。
+      if (window.top !== window) return;
+      window.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+        const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code || '') || /^([1-9])$/.exec(e.key || '');
+        if (!m) return;
+        e.preventDefault();
+        e.stopPropagation();
+        try { location.href = 'https://' + CHANNEL + '/tab-' + m[1]; } catch (err) {}
+      }, true);
+    });
   } else {
   }
 })()"#;

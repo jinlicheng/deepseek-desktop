@@ -195,14 +195,19 @@ fn reveal_last_download(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 诊断日志：诊断期**无条件**写，保证任何构建、任何启动方式都能拿到现场。
-/// 统一写到 `<系统临时目录>/jai_dl.log`。问题定位完再恢复成开关控制。
+/// 诊断日志：debug 构建始终写；release 构建设 `JAI_DL_LOG=1` 才写。
+/// 统一写到 `<系统临时目录>/jai_dl.log`。
 ///
-/// 下载的触发方式、以及 Windows 上创建 webview 卡在哪一步，都只能靠它定位。
+/// 下载的触发方式、以及 webview 的创建/导航路径，排查时都靠它。
 /// 所以路径必须走 `temp_dir()` 而不能写死 `/tmp`：后者在 Windows 上会被解析成
 /// 「当前盘符根目录下的 \tmp」，目录不存在就静默什么都不写——正是最需要日志的那台机器上没日志。
 pub(crate) fn debug_log(line: &str) {
     use std::io::Write as _;
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| cfg!(debug_assertions) || std::env::var("JAI_DL_LOG").is_ok()) {
+        return;
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
